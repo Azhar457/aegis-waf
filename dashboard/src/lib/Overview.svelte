@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { stats, dbSize } from './stores';
 
   export let controllerUrl = '';
 
@@ -22,53 +23,46 @@
     geoblock_type: string;
     blocked_countries: string[];
     custom_rules: any[];
+    rules: any[];
   }
 
+  // Labeled as "Simulated" in the UI (since there is no endpoint yet)
   let agents: AgentNode[] = [
     { name: 'Node-01-AsiaEast', ip: '10.142.0.4', status: 'online', rtt: '1.2ms', uptime: '18d 4h 12m', cpu: 14, ram: 42, disk: 18 },
     { name: 'Node-02-USWest', ip: '192.168.1.15', status: 'online', rtt: '45ms', uptime: '9d 12h 5m', cpu: 8, ram: 31, disk: 24 }
   ];
 
   let vhosts: VHost[] = [];
-  let dbSizeFormatted = '0.0 KB';
   let totalRulesToggled = 0;
   let activeVhostsCount = 0;
   let logLimitMb = 500;
   let reqsPerSec = 0;
   let blockedIps: string[] = [];
 
-  let updateInterval: any;
+  let updateInterval: ReturnType<typeof setInterval>;
+  let summaryInterval: ReturnType<typeof setInterval>;
+  let lastTotalRequests = 0;
 
   async function fetchSystemSummary() {
     try {
-      // 1. Fetch vhosts count and details
       const resVhosts = await fetch(`${controllerUrl}/api/v1/vhosts`);
       if (resVhosts.ok) {
         vhosts = await resVhosts.json();
         activeVhostsCount = vhosts.length;
         
-        // Count total rules active
         let rulesCount = 0;
         vhosts.forEach(v => {
-          rulesCount += v.rules.length + (v.custom_rules ? v.custom_rules.length : 0);
+          rulesCount += (v.rules ? v.rules.length : 0) + (v.custom_rules ? v.custom_rules.length : 0);
         });
         totalRulesToggled = rulesCount;
       }
 
-      // 2. Fetch log configuration and DB size
       const resConfig = await fetch(`${controllerUrl}/api/v1/config`);
       if (resConfig.ok) {
         const cfg = await resConfig.json();
         logLimitMb = cfg.log_limit_mb;
       }
 
-      const resDb = await fetch(`${controllerUrl}/api/v1/logs/db_size`);
-      if (resDb.ok) {
-        const dbInfo = await resDb.json();
-        dbSizeFormatted = dbInfo.formatted;
-      }
-
-      // 3. Fetch collaborative blocklist
       const resBlocklist = await fetch(`${controllerUrl}/api/v1/reputation/blocklist`);
       if (resBlocklist.ok) {
         blockedIps = await resBlocklist.json();
@@ -78,17 +72,13 @@
     }
   }
 
-  let summaryInterval: any;
-
   onMount(() => {
     fetchSystemSummary();
     summaryInterval = setInterval(fetchSystemSummary, 5000);
     
-    // Simulate real-time metrics fluctuation for the active WAF agents
     updateInterval = setInterval(() => {
       agents = agents.map(agent => {
         if (agent.status === 'online') {
-          // Fluctuating CPU and RAM usage slightly
           const cpuDelta = Math.floor(Math.random() * 7) - 3;
           const ramDelta = Math.floor(Math.random() * 3) - 1;
           return {
@@ -100,8 +90,12 @@
         return agent;
       });
 
-      // Simulate requests per second
-      reqsPerSec = Math.floor(10 + Math.random() * 45);
+      // Calculate reqsPerSec from global stats
+      const currentTotal = $stats.total_requests;
+      if (lastTotalRequests > 0) {
+        reqsPerSec = Math.max(0, Math.floor((currentTotal - lastTotalRequests) / 2.5));
+      }
+      lastTotalRequests = currentTotal;
     }, 2500);
   });
 
@@ -130,7 +124,7 @@
   </div>
 
   <!-- Agent Health Status cards -->
-  <h3 class="section-title">WAF Node Agent Diagnostics</h3>
+  <h3 class="section-title">WAF Node Agent Diagnostics (Simulated)</h3>
   <div class="grid-cols-2">
     {#each agents as agent}
       <div class="card agent-diagnostic-card">
@@ -218,7 +212,7 @@
       <div class="storage-meters">
         <div class="storage-lbl-row">
           <span>Central Database Usage</span>
-          <span class="font-mono"><strong>{dbSizeFormatted}</strong> / {logLimitMb} MB</span>
+          <span class="font-mono"><strong>{$dbSize}</strong> / {logLimitMb} MB</span>
         </div>
         <div class="progress-bar-container storage-bar">
           <div class="progress-bar-fill fill-storage" style="width: 1%"></div>

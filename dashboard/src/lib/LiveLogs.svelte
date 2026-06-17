@@ -1,49 +1,36 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { Terminal } from 'xterm';
-  import 'xterm/css/xterm.css';
+  import { Terminal } from '@xterm/xterm';
+  import { FitAddon } from '@xterm/addon-fit';
+  import { SearchAddon } from '@xterm/addon-search';
+  import '@xterm/xterm/css/xterm.css';
+  import { connectionStatus, stats, latestLog, dbSize } from './stores';
+  import type { WafLog } from './stores';
 
   export let controllerUrl = '';
 
-  interface WafLog {
-    timestamp: string;
-    client_ip: string;
-    method: string;
-    path: string;
-    action: string;
-    rule_id: string;
-    reason: string;
-  }
-
-  interface Stats {
-    total_requests: number;
-    blocked: number;
-    rate_limited: number;
-  }
-
-  // Visual dashboard states (swapped from Overview)
-  let dbStats: Stats = { total_requests: 0, blocked: 0, rate_limited: 0 };
-  let statsInterval: any;
+  // Visual dashboard states
   let attackTrend: number[] = Array(15).fill(0); // Attack rates timeline
   let lastTotalBlocked = 0;
   let activeAttacks: any[] = [];
-  let processedLogCount = 0;
+  let isDestroyed = false;
+  let trendInterval: ReturnType<typeof setInterval>;
 
   // Logging & Terminal states
   let showTerminal = false; // Drawer visibility
-  let incomingQueue: WafLog[] = [];
-  let eventSource: EventSource | null = null;
-  let connectionStatus: 'connecting' | 'online' | 'offline' = 'connecting';
+  let incomingTerminalQueue: WafLog[] = [];
   let enableLogging = true;
   let logLimitSelection = '500';
   let customLimitValue = 500;
-  let currentDbSize = '0.0 KB';
 
-  let flushInterval: any;
-  let dbSizeInterval: any;
+  let flushInterval: ReturnType<typeof setInterval>;
+  let dbSizeInterval: ReturnType<typeof setInterval>;
+  let resizeObserver: ResizeObserver;
 
   let terminalDiv: HTMLDivElement;
   let term: Terminal | null = null;
+  let fitAddon: FitAddon | null = null;
+  let searchAddon: SearchAddon | null = null;
   let isScrollLocked = true;
 
   const countries = [
@@ -58,15 +45,8 @@
   ];
 
   const flags: { [code: string]: string } = {
-    'US': '🇺🇸',
-    'DE': '🇩🇪',
-    'RU': '🇷🇺',
-    'CN': '🇨🇳',
-    'SG': '🇸🇬',
-    'ID': '🇮🇩',
-    'BR': '🇧🇷',
-    'AU': '🇦🇺',
-    'LOCAL': '🏠'
+    'US': '🇺🇸', 'DE': '🇩🇪', 'RU': '🇷🇺', 'CN': '🇨🇳',
+    'SG': '🇸🇬', 'ID': '🇮🇩', 'BR': '🇧🇷', 'AU': '🇦🇺', 'LOCAL': '🏠'
   };
 
   let countryLeaderboard: { [code: string]: { name: string, count: number } } = {
@@ -104,6 +84,9 @@
     .slice(0, 5);
 
   function triggerAttackAnimation(log: WafLog) {
+    if (isDestroyed) return;
+    if (activeAttacks.length >= 15) return; // M2 Fix: Cap active animations
+    
     const country = getIpCountry(log.client_ip);
     const attackId = Math.random().toString(36).substring(2, 9);
     const newAttack = {
@@ -123,7 +106,9 @@
     updateLeaderboard(country.code, country.name);
 
     setTimeout(() => {
-      activeAttacks = activeAttacks.filter(a => a.id !== attackId);
+      if (!isDestroyed) {
+        activeAttacks = activeAttacks.filter(a => a.id !== attackId);
+      }
     }, 1500);
   }
 
@@ -170,29 +155,10 @@
       const res = await fetch(`${controllerUrl}/api/v1/logs/db_size`);
       if (res.ok) {
         const data = await res.json();
-        currentDbSize = data.formatted;
+        dbSize.set(data.formatted);
       }
     } catch (e) {
       console.error(e);
-    }
-  }
-
-  async function fetchStats() {
-    try {
-      const res = await fetch(`${controllerUrl}/api/v1/stats`);
-      if (res.ok) {
-        dbStats = await res.json();
-        const currentTotalBlocked = dbStats.blocked + dbStats.rate_limited;
-        if (lastTotalBlocked > 0) {
-          const delta = Math.max(0, currentTotalBlocked - lastTotalBlocked);
-          attackTrend = [...attackTrend.slice(1), delta];
-        } else {
-          attackTrend = [...attackTrend.slice(1), 0];
-        }
-        lastTotalBlocked = currentTotalBlocked;
-      }
-    } catch (e) {
-      console.error("Failed to fetch stats", e);
     }
   }
 
@@ -235,10 +201,21 @@
         if (term) {
           term.clear();
           printWelcomeBanner();
-          data.reverse().forEach(log => {
-            term?.writeln(formatAnsiLog(log));
-          });
-          if (isScrollLocked) term.scrollToBottom();
+          
+          // M3 Fix: Batch initial log writes with requestAnimationFrame to prevent freeze
+          const writeChunk = (logsChunk: WafLog[], chunkSize: number, startIndex: number) => {
+            if (isDestroyed || !term) return;
+            const end = Math.min(startIndex + chunkSize, logsChunk.length);
+            for (let i = startIndex; i < end; i++) {
+              term.writeln(formatAnsiLog(logsChunk[i]));
+            }
+            if (end < logsChunk.length) {
+              requestAnimationFrame(() => writeChunk(logsChunk, chunkSize, end));
+            } else if (isScrollLocked) {
+              term.scrollToBottom();
+            }
+          };
+          writeChunk(data.reverse(), 50, 0);
         }
       }
     } catch (e) {
@@ -246,10 +223,36 @@
     }
   }
 
-  onMount(() => {
-    // Initialize stats
-    fetchStats();
-    statsInterval = setInterval(fetchStats, 3000);
+  $: {
+    if (showTerminal && fitAddon && terminalDiv) {
+      setTimeout(() => fitAddon?.fit(), 50); // M4 Fix: give drawer time to open before fitting
+    }
+  }
+
+  // Subscribe to latest log from Global Store
+  latestLog.subscribe(log => {
+    if (log && !isDestroyed) {
+      incomingTerminalQueue.push(log);
+      if (log.action === 'BLOCK' || log.action === 'RATE_LIMIT' || log.action === 'REDIRECT') {
+        triggerAttackAnimation(log);
+      }
+    }
+  });
+
+  onMount(async () => {
+    isDestroyed = false;
+
+    // Trend simulation calculation based on global stats
+    trendInterval = setInterval(() => {
+      const currentTotalBlocked = $stats.blocked + $stats.rate_limited;
+      if (lastTotalBlocked > 0) {
+        const delta = Math.max(0, currentTotalBlocked - lastTotalBlocked);
+        attackTrend = [...attackTrend.slice(1), delta];
+      } else {
+        attackTrend = [...attackTrend.slice(1), 0];
+      }
+      lastTotalBlocked = currentTotalBlocked;
+    }, 5000);
 
     // Initialize xterm.js
     term = new Terminal({
@@ -275,8 +278,21 @@
       disableStdin: true
     });
 
+    fitAddon = new FitAddon();
+    searchAddon = new SearchAddon();
+    term.loadAddon(fitAddon);
+    term.loadAddon(searchAddon);
+
     term.open(terminalDiv);
     printWelcomeBanner();
+
+    // M4 Fix: handle browser resize properly
+    resizeObserver = new ResizeObserver(() => {
+      if (showTerminal) {
+        fitAddon?.fit();
+      }
+    });
+    resizeObserver.observe(terminalDiv);
 
     term.onScroll((newY) => {
       if (term) {
@@ -288,39 +304,17 @@
 
     fetchConfig();
     fetchDbSize();
-    fetchInitialLogs();
+    
+    // M1 Fix: wait for initial logs to finish before we start flushing SSE queue
+    await fetchInitialLogs();
 
-    // SSE connection
-    const sseUrl = `${controllerUrl}/api/v1/logs/stream`;
-    eventSource = new EventSource(sseUrl);
-
-    eventSource.onopen = () => {
-      connectionStatus = 'online';
-    };
-
-    eventSource.onerror = () => {
-      connectionStatus = 'offline';
-    };
-
-    eventSource.onmessage = (event) => {
-      try {
-        const log: WafLog = JSON.parse(event.data);
-        incomingQueue.push(log);
-        
-        // Trigger attack animation if blocking/rate-limiting/redirecting
-        if (log.action === 'BLOCK' || log.action === 'RATE_LIMIT' || log.action === 'REDIRECT') {
-          triggerAttackAnimation(log);
-        }
-      } catch (e) {}
-    };
-
-    // 200ms flush queue
+    // 200ms flush queue for terminal
     flushInterval = setInterval(() => {
-      if (incomingQueue.length > 0 && term) {
-        incomingQueue.forEach(log => {
+      if (incomingTerminalQueue.length > 0 && term) {
+        incomingTerminalQueue.forEach(log => {
           term?.writeln(formatAnsiLog(log));
         });
-        incomingQueue = [];
+        incomingTerminalQueue = [];
 
         if (isScrollLocked) {
           term.scrollToBottom();
@@ -332,10 +326,11 @@
   });
 
   onDestroy(() => {
-    if (eventSource) eventSource.close();
+    isDestroyed = true;
     if (flushInterval) clearInterval(flushInterval);
     if (dbSizeInterval) clearInterval(dbSizeInterval);
-    if (statsInterval) clearInterval(statsInterval);
+    if (trendInterval) clearInterval(trendInterval);
+    if (resizeObserver) resizeObserver.disconnect();
     if (term) term.dispose();
   });
 
@@ -348,7 +343,7 @@
       term.clear();
       printWelcomeBanner();
     }
-    incomingQueue = [];
+    incomingTerminalQueue = [];
   }
 
   // SVG Chart path calculation with Auto-Scaling
@@ -377,7 +372,7 @@
     <div class="card animate-fade-in">
       <div class="card-title">Legitimate Requests</div>
       <div class="card-value text-pass font-bold">
-        {formatCount(dbStats.total_requests)}
+        {formatCount($stats.total_requests)}
       </div>
       <div class="card-subtext">
         <span class="dot online"></span> Active traffic passing WAF proxy
@@ -388,7 +383,7 @@
     <div class="card bg-critical-glow animate-fade-in">
       <div class="card-title text-critical">Blocked Attacks</div>
       <div class="card-value text-critical font-bold font-mono">
-        {formatCount(dbStats.blocked)}
+        {formatCount($stats.blocked)}
       </div>
       <div class="card-subtext">
         🔒 SQLi, XSS, Path Traversal attempts thwarted
@@ -399,7 +394,7 @@
     <div class="card bg-high-glow animate-fade-in">
       <div class="card-title text-high">Rate Limited IPs</div>
       <div class="card-value text-high font-bold font-mono">
-        {formatCount(dbStats.rate_limited)}
+        {formatCount($stats.rate_limited)}
       </div>
       <div class="card-subtext">
         ⚡ Brute force and DoS nodes throttled
@@ -463,8 +458,8 @@
         </button>
         <span class="status-indicator-inline">
           Connection: 
-          <strong class={connectionStatus === 'online' ? 'text-pass' : 'text-critical'}>
-            {connectionStatus.toUpperCase()}
+          <strong class={$connectionStatus === 'online' ? 'text-pass' : 'text-critical'}>
+            {$connectionStatus.toUpperCase()}
           </strong>
         </span>
       </div>
@@ -603,7 +598,7 @@
 
         <div class="control-right">
           <span class="db-size-indicator font-mono">
-            Size: <strong>{currentDbSize}</strong>
+            Size: <strong>{$dbSize}</strong>
           </span>
 
           <button on:click={clearTerminal} class="btn btn-secondary btn-sm clear-terminal-btn font-bold">

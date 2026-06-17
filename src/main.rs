@@ -276,6 +276,10 @@ async fn run_controller(port: u16, config_path: String) {
 
     // Initialize database
     let conn = rusqlite::Connection::open(db_path).expect("Failed to open controller DB");
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=NORMAL;"
+    ).expect("Failed to enable WAL mode");
     conn.execute(
         "CREATE TABLE IF NOT EXISTS request_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -685,16 +689,61 @@ async fn get_stats_handler(
     }
 }
 
-async fn ws_dashboard_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_dashboard_socket(socket))
+async fn ws_dashboard_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<ControllerState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(|socket| handle_dashboard_socket(socket, state))
 }
 
 async fn ws_agent_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(|socket| handle_agent_socket(socket))
 }
 
-async fn handle_dashboard_socket(_socket: WebSocket) {
+async fn handle_dashboard_socket(mut socket: WebSocket, state: ControllerState) {
     info!("Dashboard client connected via WebSocket");
+    let mut rx = state.tx.subscribe();
+    let db_path = state.db_path.clone();
+    let mut stats_interval = tokio::time::interval(std::time::Duration::from_secs(5));
+
+    loop {
+        tokio::select! {
+            Ok(log) = rx.recv() => {
+                let json = serde_json::json!({
+                    "type": "log",
+                    "timestamp": log.timestamp,
+                    "client_ip": log.client_ip,
+                    "method": log.method,
+                    "path": log.path,
+                    "action": log.action,
+                    "rule_id": log.rule_id,
+                    "reason": log.reason
+                });
+                if socket.send(axum::extract::ws::Message::Text(json.to_string())).await.is_err() {
+                    break;
+                }
+            }
+            _ = stats_interval.tick() => {
+                if let Ok(stats) = logging::get_stats(&db_path, 24) {
+                    let json = serde_json::json!({
+                        "type": "stats",
+                        "total_requests": stats.total_requests,
+                        "blocked": stats.blocked,
+                        "rate_limited": stats.rate_limited
+                    });
+                    if socket.send(axum::extract::ws::Message::Text(json.to_string())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            Some(msg) = socket.recv() => {
+                if msg.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    info!("Dashboard client disconnected");
 }
 
 async fn handle_agent_socket(_socket: WebSocket) {

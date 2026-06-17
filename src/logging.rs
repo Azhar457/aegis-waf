@@ -29,6 +29,10 @@ pub fn init_db(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(log_dir)?;
     let db_path = log_dir.join("aegis-waf.db");
     let conn = Connection::open(db_path)?;
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=NORMAL;"
+    )?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS request_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
