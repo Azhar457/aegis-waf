@@ -1,0 +1,15 @@
+{
+  "name": "aegis-waf-root",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Root script manager for Aegis WAF and Dashboard",
+  "scripts": {
+    "dashboard:install": "npm install --prefix dashboard",
+    "dashboard:build": "npm run build --prefix dashboard",
+    "dashboard:dev": "npm run dev --prefix dashboard",
+    "waf:build": "cargo build",
+    "waf:controller": "cargo run -- controller",
+    "waf:agent": "cargo run -- agent --controller http://localhost:8080",
+    "build-all": "npm run dashboard:build && npm run waf:build"
+  }
+}

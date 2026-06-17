@@ -1,0 +1,21 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Node build artifacts
+/node_modules/
+/dashboard/node_modules/
+/dashboard/dist/
+
+# WAF logs, databases & certificates
+/logs/
+/certs/
+*.db
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+#Document
+AEGIS_WAF_KIMI_CODE.md

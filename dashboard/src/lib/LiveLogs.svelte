@@ -1,0 +1,999 @@
+<script lang="ts">
+  import { onMount, onDestroy } from 'svelte';
+  import { Terminal } from 'xterm';
+  import 'xterm/css/xterm.css';
+
+  export let controllerUrl = '';
+
+  interface WafLog {
+    timestamp: string;
+    client_ip: string;
+    method: string;
+    path: string;
+    action: string;
+    rule_id: string;
+    reason: string;
+  }
+
+  interface Stats {
+    total_requests: number;
+    blocked: number;
+    rate_limited: number;
+  }
+
+  // Visual dashboard states (swapped from Overview)
+  let dbStats: Stats = { total_requests: 0, blocked: 0, rate_limited: 0 };
+  let statsInterval: any;
+  let attackTrend: number[] = Array(15).fill(0); // Attack rates timeline
+  let lastTotalBlocked = 0;
+  let activeAttacks: any[] = [];
+  let processedLogCount = 0;
+
+  // Logging & Terminal states
+  let showTerminal = false; // Drawer visibility
+  let incomingQueue: WafLog[] = [];
+  let eventSource: EventSource | null = null;
+  let connectionStatus: 'connecting' | 'online' | 'offline' = 'connecting';
+  let enableLogging = true;
+  let logLimitSelection = '500';
+  let customLimitValue = 500;
+  let currentDbSize = '0.0 KB';
+
+  let flushInterval: any;
+  let dbSizeInterval: any;
+
+  let terminalDiv: HTMLDivElement;
+  let term: Terminal | null = null;
+  let isScrollLocked = true;
+
+  const countries = [
+    { code: 'US', name: 'United States', x: 100, y: 45 },
+    { code: 'DE', name: 'Germany', x: 260, y: 35 },
+    { code: 'RU', name: 'Russia', x: 340, y: 30 },
+    { code: 'CN', name: 'China', x: 385, y: 50 },
+    { code: 'SG', name: 'Singapore', x: 405, y: 73 },
+    { code: 'ID', name: 'Indonesia', x: 415, y: 78 },
+    { code: 'BR', name: 'Brazil', x: 180, y: 85 },
+    { code: 'AU', name: 'Australia', x: 440, y: 95 }
+  ];
+
+  const flags: { [code: string]: string } = {
+    'US': '🇺🇸',
+    'DE': '🇩🇪',
+    'RU': '🇷🇺',
+    'CN': '🇨🇳',
+    'SG': '🇸🇬',
+    'ID': '🇮🇩',
+    'BR': '🇧🇷',
+    'AU': '🇦🇺',
+    'LOCAL': '🏠'
+  };
+
+  let countryLeaderboard: { [code: string]: { name: string, count: number } } = {
+    'RU': { name: 'Russia', count: 0 },
+    'CN': { name: 'China', count: 0 },
+    'US': { name: 'United States', count: 0 },
+    'DE': { name: 'Germany', count: 0 },
+    'BR': { name: 'Brazil', count: 0 }
+  };
+
+  function getIpCountry(ip: string) {
+    if (ip.startsWith('127.') || ip.startsWith('192.168.') || ip.startsWith('10.') || ip === '::1' || ip.startsWith('172.')) {
+      return { code: 'LOCAL', name: 'Local Network', x: 415, y: 65 };
+    }
+    let hash = 0;
+    for (let i = 0; i < ip.length; i++) {
+      hash = ip.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    const index = Math.abs(hash) % countries.length;
+    return countries[index];
+  }
+
+  function updateLeaderboard(code: string, name: string) {
+    if (code === 'LOCAL') return;
+    if (!countryLeaderboard[code]) {
+      countryLeaderboard[code] = { name, count: 0 };
+    }
+    countryLeaderboard[code].count += 1;
+    countryLeaderboard = { ...countryLeaderboard };
+  }
+
+  $: sortedCountries = Object.entries(countryLeaderboard)
+    .map(([code, item]) => ({ code, name: item.name, count: item.count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
+
+  function triggerAttackAnimation(log: WafLog) {
+    const country = getIpCountry(log.client_ip);
+    const attackId = Math.random().toString(36).substring(2, 9);
+    const newAttack = {
+      id: attackId,
+      fromName: country.name,
+      fromCode: country.code,
+      x1: country.x,
+      y1: country.y,
+      x2: 415, // WAF Node Jakarta
+      y2: 78,
+      action: log.action,
+      ip: log.client_ip,
+      reason: log.reason
+    };
+
+    activeAttacks = [...activeAttacks, newAttack];
+    updateLeaderboard(country.code, country.name);
+
+    setTimeout(() => {
+      activeAttacks = activeAttacks.filter(a => a.id !== attackId);
+    }, 1500);
+  }
+
+  // Fetch configs from Backend
+  async function fetchConfig() {
+    try {
+      const res = await fetch(`${controllerUrl}/api/v1/config`);
+      if (res.ok) {
+        const data = await res.json();
+        enableLogging = data.logging_enabled;
+        const limit = data.log_limit_mb;
+        if (limit === 500 || limit === 1024) {
+          logLimitSelection = limit.toString();
+        } else {
+          logLimitSelection = 'custom';
+          customLimitValue = limit;
+        }
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  // Update Config on Backend
+  async function updateConfig() {
+    const limit = logLimitSelection === 'custom' ? customLimitValue : parseInt(logLimitSelection);
+    try {
+      await fetch(`${controllerUrl}/api/v1/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          logging_enabled: enableLogging,
+          log_limit_mb: limit
+        })
+      });
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  // Get current DB Size
+  async function fetchDbSize() {
+    try {
+      const res = await fetch(`${controllerUrl}/api/v1/logs/db_size`);
+      if (res.ok) {
+        const data = await res.json();
+        currentDbSize = data.formatted;
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function fetchStats() {
+    try {
+      const res = await fetch(`${controllerUrl}/api/v1/stats`);
+      if (res.ok) {
+        dbStats = await res.json();
+        const currentTotalBlocked = dbStats.blocked + dbStats.rate_limited;
+        if (lastTotalBlocked > 0) {
+          const delta = Math.max(0, currentTotalBlocked - lastTotalBlocked);
+          attackTrend = [...attackTrend.slice(1), delta];
+        } else {
+          attackTrend = [...attackTrend.slice(1), 0];
+        }
+        lastTotalBlocked = currentTotalBlocked;
+      }
+    } catch (e) {
+      console.error("Failed to fetch stats", e);
+    }
+  }
+
+  // Format single log to ANSI colored string for xterm.js
+  function formatAnsiLog(log: WafLog): string {
+    const timePart = log.timestamp.split('T')[1];
+    const ts = timePart ? timePart.substring(0, 8) : log.timestamp;
+    
+    const ip = log.client_ip;
+    const act = log.action;
+    const path = log.path;
+    const rId = log.rule_id;
+    const reason = log.reason;
+
+    let actionColor = "\x1b[37m";
+    if (act === 'BLOCK') {
+      actionColor = "\x1b[1;31m";
+    } else if (act === 'RATE_LIMIT') {
+      actionColor = "\x1b[1;33m";
+    } else if (act === 'REDIRECT') {
+      actionColor = "\x1b[1;34m"; // Bold Blue for custom redirect
+    }
+
+    return `\x1b[90m[${ts}]\x1b[0m \x1b[32m${ip}\x1b[0m ${actionColor}| ${act} |\x1b[0m \x1b[36m"${path}"\x1b[0m \x1b[33m[${rId}]\x1b[0m \x1b[37m- ${reason}\x1b[0m`;
+  }
+
+  function printWelcomeBanner() {
+    if (!term) return;
+    term.writeln("\x1b[90m================================================================================\x1b[0m");
+    term.writeln("\x1b[1;36mAEGIS WAF v1.0 - CORE ACCESS TERMINAL SYSTEM (ACTIVE MONITORS)\x1b[0m");
+    term.writeln(`\x1b[90mSTATUS: \x1b[1;32mONLINE\x1b[0m \x1b[90m| HARDWARE-ACCELERATED STREAM ACTIVE\x1b[0m`);
+    term.writeln("\x1b[90m================================================================================\x1b[0m\r\n");
+  }
+
+  async function fetchInitialLogs() {
+    try {
+      const res = await fetch(`${controllerUrl}/api/v1/logs`);
+      if (res.ok) {
+        const data: WafLog[] = await res.json();
+        if (term) {
+          term.clear();
+          printWelcomeBanner();
+          data.reverse().forEach(log => {
+            term?.writeln(formatAnsiLog(log));
+          });
+          if (isScrollLocked) term.scrollToBottom();
+        }
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  onMount(() => {
+    // Initialize stats
+    fetchStats();
+    statsInterval = setInterval(fetchStats, 3000);
+
+    // Initialize xterm.js
+    term = new Terminal({
+      theme: {
+        background: '#050508',
+        foreground: '#e2e8f0',
+        cursor: '#ffffff',
+        black: '#000000',
+        red: '#f43f5e',
+        green: '#10b981',
+        yellow: '#fbbf24',
+        blue: '#3b82f6',
+        magenta: '#d946ef',
+        cyan: '#22d3ee',
+        white: '#ffffff',
+      },
+      fontFamily: 'Consolas, Fira Code, Monaco, monospace',
+      fontSize: 12,
+      lineHeight: 1.3,
+      cursorBlink: true,
+      scrollback: 2000,
+      convertEol: true,
+      disableStdin: true
+    });
+
+    term.open(terminalDiv);
+    printWelcomeBanner();
+
+    term.onScroll((newY) => {
+      if (term) {
+        const viewportY = term.buffer.active.viewportY;
+        const baseY = term.buffer.active.baseY;
+        isScrollLocked = (viewportY >= baseY - 1);
+      }
+    });
+
+    fetchConfig();
+    fetchDbSize();
+    fetchInitialLogs();
+
+    // SSE connection
+    const sseUrl = `${controllerUrl}/api/v1/logs/stream`;
+    eventSource = new EventSource(sseUrl);
+
+    eventSource.onopen = () => {
+      connectionStatus = 'online';
+    };
+
+    eventSource.onerror = () => {
+      connectionStatus = 'offline';
+    };
+
+    eventSource.onmessage = (event) => {
+      try {
+        const log: WafLog = JSON.parse(event.data);
+        incomingQueue.push(log);
+        
+        // Trigger attack animation if blocking/rate-limiting/redirecting
+        if (log.action === 'BLOCK' || log.action === 'RATE_LIMIT' || log.action === 'REDIRECT') {
+          triggerAttackAnimation(log);
+        }
+      } catch (e) {}
+    };
+
+    // 200ms flush queue
+    flushInterval = setInterval(() => {
+      if (incomingQueue.length > 0 && term) {
+        incomingQueue.forEach(log => {
+          term?.writeln(formatAnsiLog(log));
+        });
+        incomingQueue = [];
+
+        if (isScrollLocked) {
+          term.scrollToBottom();
+        }
+      }
+    }, 200);
+
+    dbSizeInterval = setInterval(fetchDbSize, 5000);
+  });
+
+  onDestroy(() => {
+    if (eventSource) eventSource.close();
+    if (flushInterval) clearInterval(flushInterval);
+    if (dbSizeInterval) clearInterval(dbSizeInterval);
+    if (statsInterval) clearInterval(statsInterval);
+    if (term) term.dispose();
+  });
+
+  function handleExport() {
+    window.open(`${controllerUrl}/api/v1/logs/export`, '_blank');
+  }
+
+  function clearTerminal() {
+    if (term) {
+      term.clear();
+      printWelcomeBanner();
+    }
+    incomingQueue = [];
+  }
+
+  // SVG Chart path calculation with Auto-Scaling
+  $: chartWidth = 500;
+  $: chartHeight = 120;
+  $: maxTrendVal = Math.max(...attackTrend, 10);
+  $: chartPoints = attackTrend.map((val, i) => {
+    const x = (i / (attackTrend.length - 1)) * chartWidth;
+    const y = chartHeight - (val / maxTrendVal) * (chartHeight - 10);
+    return `${x},${y}`;
+  }).join(' ');
+
+  function formatCount(num: number): string {
+    if (num < 1000) return num.toString();
+    if (num < 1000000) {
+      return (num / 1000).toFixed(1).replace('.0', '') + 'k';
+    }
+    return (num / 1000000).toFixed(1).replace('.0', '') + 'M';
+  }
+</script>
+
+<div class="visual-dashboard-panel">
+  <!-- Counters Row -->
+  <div class="grid-cols-3">
+    <!-- Card 1 -->
+    <div class="card animate-fade-in">
+      <div class="card-title">Legitimate Requests</div>
+      <div class="card-value text-pass font-bold">
+        {formatCount(dbStats.total_requests)}
+      </div>
+      <div class="card-subtext">
+        <span class="dot online"></span> Active traffic passing WAF proxy
+      </div>
+    </div>
+    
+    <!-- Card 2 -->
+    <div class="card bg-critical-glow animate-fade-in">
+      <div class="card-title text-critical">Blocked Attacks</div>
+      <div class="card-value text-critical font-bold font-mono">
+        {formatCount(dbStats.blocked)}
+      </div>
+      <div class="card-subtext">
+        🔒 SQLi, XSS, Path Traversal attempts thwarted
+      </div>
+    </div>
+
+    <!-- Card 3 -->
+    <div class="card bg-high-glow animate-fade-in">
+      <div class="card-title text-high">Rate Limited IPs</div>
+      <div class="card-value text-high font-bold font-mono">
+        {formatCount(dbStats.rate_limited)}
+      </div>
+      <div class="card-subtext">
+        ⚡ Brute force and DoS nodes throttled
+      </div>
+    </div>
+  </div>
+
+  <!-- Chart and Trigger Bar -->
+  <div class="grid-cols-2">
+    <!-- Chart Card -->
+    <div class="card chart-card">
+      <div class="chart-header-group">
+        <h3 class="panel-subtitle">Real-Time Threat Level (Last 45s)</h3>
+        <span class="badge scale-badge">Max: {maxTrendVal} req/3s</span>
+      </div>
+      <div class="chart-container">
+        <svg viewBox="0 0 500 120" preserveAspectRatio="none" class="chart-svg">
+          <defs>
+            <linearGradient id="chartGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="var(--color-critical)" stop-opacity="0.3"/>
+              <stop offset="100%" stop-color="var(--color-critical)" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+
+          <!-- Grid Lines -->
+          <line x1="0" y1="30" x2="500" y2="30" stroke="rgba(255,255,255,0.03)" stroke-width="1" />
+          <line x1="0" y1="60" x2="500" y2="60" stroke="rgba(255,255,255,0.03)" stroke-width="1" />
+          <line x1="0" y1="90" x2="500" y2="90" stroke="rgba(255,255,255,0.03)" stroke-width="1" />
+
+          <!-- Filled path -->
+          <path 
+            d="M0,{chartHeight} L{chartPoints} L{chartWidth},{chartHeight} Z" 
+            fill="url(#chartGrad)" 
+          />
+
+          <!-- Trend line -->
+          <polyline 
+            fill="none" 
+            stroke="var(--color-critical)" 
+            stroke-width="2.5" 
+            points={chartPoints}
+            class="glow-critical"
+          />
+        </svg>
+      </div>
+      <div class="chart-labels">
+        <span>45s ago</span>
+        <span>Now (Scaled)</span>
+      </div>
+    </div>
+
+    <!-- Live Terminal Launcher Panel -->
+    <div class="card terminal-launcher-card bg-terminal-glow">
+      <h3 class="panel-subtitle">WAF Access Terminal Monitor</h3>
+      <p class="launcher-desc text-muted">
+        Stream raw connection requests, geoblocking logs, and matched signatures with zero delay. Perfect for inspection during nmap/nikto vulnerability scans.
+      </p>
+      <div class="launcher-actions">
+        <button on:click={() => showTerminal = true} class="btn btn-primary monitor-btn font-bold">
+          📺 Open Core Terminal Monitor
+        </button>
+        <span class="status-indicator-inline">
+          Connection: 
+          <strong class={connectionStatus === 'online' ? 'text-pass' : 'text-critical'}>
+            {connectionStatus.toUpperCase()}
+          </strong>
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Threat Map & Leaderboard -->
+  <div class="grid-map-panel">
+    <!-- Map Card -->
+    <div class="card map-card">
+      <h3 class="panel-subtitle">Real-Time Global Threat Map (Offline Resolver)</h3>
+      <div class="map-wrapper">
+        <svg viewBox="0 0 500 150" class="world-svg">
+          <!-- Continents -->
+          <path d="M 50,30 Q 85,25 120,30 T 150,55 T 100,70 T 50,30" fill="rgba(255, 255, 255, 0.02)" stroke="rgba(255, 255, 255, 0.08)" stroke-width="1" />
+          <path d="M 140,70 L 175,80 L 155,115 L 140,70" fill="rgba(255, 255, 255, 0.02)" stroke="rgba(255, 255, 255, 0.08)" stroke-width="1" />
+          <path d="M 230,30 L 270,25 L 290,45 L 250,70 L 230,95 L 210,75 L 230,30" fill="rgba(255, 255, 255, 0.02)" stroke="rgba(255, 255, 255, 0.08)" stroke-width="1" />
+          <path d="M 290,25 L 440,25 L 460,65 L 390,80 L 350,55 L 290,25" fill="rgba(255, 255, 255, 0.02)" stroke="rgba(255, 255, 255, 0.08)" stroke-width="1" />
+          <path d="M 430,90 L 460,95 L 450,110 L 430,90" fill="rgba(255, 255, 255, 0.02)" stroke="rgba(255, 255, 255, 0.08)" stroke-width="1" />
+
+          <!-- Target WAF Node (Jakarta/Indonesia) -->
+          <circle cx="415" cy="78" r="4.5" fill="var(--color-pass)" class="glow-pass" />
+          <circle cx="415" cy="78" r="14" fill="none" stroke="var(--color-pass)" stroke-width="1.5">
+            <animate attributeName="r" values="4.5;18" dur="2.5s" repeatCount="indefinite" />
+            <animate attributeName="opacity" values="1;0" dur="2.5s" repeatCount="indefinite" />
+          </circle>
+
+          <!-- Attack Lines (Arcs) -->
+          {#each activeAttacks as attack (attack.id)}
+            <path
+              d="M {attack.x1} {attack.y1} Q {(attack.x1 + attack.x2) / 2} {Math.min(attack.y1, attack.y2) - 25} {attack.x2} {attack.y2}"
+              fill="none"
+              stroke="var(--color-critical)"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-dasharray="100"
+              stroke-dashoffset="100"
+              class="attack-arc"
+            />
+            
+            <circle r="3" fill="var(--color-critical)">
+              <animateMotion
+                path="M {attack.x1} {attack.y1} Q {(attack.x1 + attack.x2) / 2} {Math.min(attack.y1, attack.y2) - 25} {attack.x2} {attack.y2}"
+                dur="1.2s"
+                repeatCount="1"
+                fill="freeze"
+              />
+            </circle>
+
+            <circle cx={attack.x1} cy={attack.y1} r="3" fill="var(--color-critical)" />
+            <circle cx={attack.x1} cy={attack.y1} r="10" fill="none" stroke="var(--color-critical)" stroke-width="1">
+              <animate attributeName="r" values="3;14" dur="1s" repeatCount="1" />
+              <animate attributeName="opacity" values="1;0" dur="1s" repeatCount="1" />
+            </circle>
+          {/each}
+        </svg>
+
+        {#if activeAttacks.length > 0}
+          <div class="threat-alert-flash">ATTACK THWARTED</div>
+        {/if}
+      </div>
+    </div>
+
+    <!-- Leaderboard -->
+    <div class="card leaderboard-card">
+      <h3 class="panel-subtitle">Top Attack Sources</h3>
+      <div class="leaderboard-list">
+        {#each sortedCountries as country, i}
+          <div class="leaderboard-item animate-fade-in">
+            <span class="rank font-mono">#{i + 1}</span>
+            <span class="flag">{flags[country.code] || '🌐'}</span>
+            <span class="country-name">{country.name}</span>
+            <span class="attacks-badge font-mono">{formatCount(country.count)}</span>
+          </div>
+        {:else}
+          <div class="empty-leaderboard font-mono text-muted">
+            No attacks blocked during this session
+          </div>
+        {/each}
+      </div>
+    </div>
+  </div>
+
+  <!-- Slide-Out Terminal Drawer Overlay -->
+  <div class="terminal-drawer-overlay {showTerminal ? 'open' : ''}">
+    <div class="terminal-drawer card">
+      <div class="drawer-header">
+        <div class="drawer-hdr-title">
+          <span class="dot online animate-pulse"></span>
+          <h4 class="panel-subtitle">📺 Raw WAF Access Terminal Logs</h4>
+        </div>
+        <button on:click={() => showTerminal = false} class="btn btn-secondary btn-sm close-drawer-btn font-bold">
+          ✖ Close Monitor
+        </button>
+      </div>
+
+      <!-- Controls row -->
+      <div class="terminal-controls">
+        <div class="control-left">
+          <label class="checkbox-container">
+            <input 
+              type="checkbox" 
+              bind:checked={enableLogging} 
+              on:change={updateConfig}
+            />
+            <span class="checkbox-label font-bold">Enable access log</span>
+          </label>
+
+          <div class="limit-selector">
+            <span class="control-txt">Limit:</span>
+            <select 
+              bind:value={logLimitSelection} 
+              on:change={updateConfig}
+              class="input-field select-limit"
+            >
+              <option value="500">500 MB</option>
+              <option value="1024">1024 MB</option>
+              <option value="custom">Custom</option>
+            </select>
+
+            {#if logLimitSelection === 'custom'}
+              <div class="custom-input-group">
+                <input 
+                  type="number" 
+                  bind:value={customLimitValue} 
+                  on:blur={updateConfig}
+                  class="input-field custom-limit-input"
+                  min="10" 
+                  max="10240"
+                />
+                <span class="mb-label">MB</span>
+              </div>
+            {/if}
+          </div>
+        </div>
+
+        <div class="control-right">
+          <span class="db-size-indicator font-mono">
+            Size: <strong>{currentDbSize}</strong>
+          </span>
+
+          <button on:click={clearTerminal} class="btn btn-secondary btn-sm clear-terminal-btn font-bold">
+            Clear
+          </button>
+
+          <button on:click={handleExport} class="btn btn-primary btn-sm export-btn" title="Download Log File">
+            📥 Export
+          </button>
+        </div>
+      </div>
+
+      <!-- xterm.js terminal box container -->
+      <div class="terminal-box">
+        <div bind:this={terminalDiv} class="terminal-container"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+  .visual-dashboard-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  .panel-subtitle {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: #ffffff;
+    letter-spacing: -0.2px;
+    margin: 0;
+  }
+
+  .chart-header-group {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1.25rem;
+  }
+
+  .scale-badge {
+    font-size: 0.75rem;
+    background-color: rgba(244, 63, 94, 0.1);
+    color: var(--color-critical);
+    border: 1px solid rgba(244, 63, 94, 0.15);
+  }
+
+  .chart-card {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .chart-container {
+    height: 120px;
+    position: relative;
+    margin-bottom: 0.5rem;
+  }
+
+  .chart-svg {
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+
+  .chart-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+  }
+
+  /* Threat Map Panel */
+  .grid-map-panel {
+    display: grid;
+    grid-template-columns: 2.2fr 1fr;
+    gap: 1.25rem;
+  }
+
+  .map-card {
+    display: flex;
+    flex-direction: column;
+    padding: 1.25rem 1.5rem;
+    position: relative;
+  }
+
+  .map-wrapper {
+    background-color: rgba(0, 0, 0, 0.35);
+    border: 1px solid var(--border-card);
+    border-radius: 8px;
+    padding: 0.5rem;
+    position: relative;
+    margin-top: 1rem;
+    overflow: hidden;
+  }
+
+  .world-svg {
+    width: 100%;
+    height: auto;
+    display: block;
+  }
+
+  .threat-alert-flash {
+    position: absolute;
+    top: 10px;
+    right: 15px;
+    background-color: rgba(244, 63, 94, 0.95);
+    color: white;
+    padding: 0.2rem 0.5rem;
+    font-size: 0.75rem;
+    font-weight: 800;
+    border-radius: 4px;
+    letter-spacing: 0.8px;
+    animation: flash-red 0.5s ease-in-out infinite alternate;
+  }
+
+  @keyframes flash-red {
+    0% { opacity: 0.4; }
+    100% { opacity: 1; }
+  }
+
+  @keyframes draw-arc {
+    0% {
+      stroke-dashoffset: 100;
+    }
+    100% {
+      stroke-dashoffset: 0;
+    }
+  }
+
+  .attack-arc {
+    animation: draw-arc 1.2s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
+  }
+
+  /* Leaderboard Card */
+  .leaderboard-card {
+    display: flex;
+    flex-direction: column;
+    padding: 1.25rem 1.5rem;
+  }
+
+  .leaderboard-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-top: 1rem;
+  }
+
+  .leaderboard-item {
+    display: flex;
+    align-items: center;
+    padding: 0.65rem 0.85rem;
+    background-color: rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--border-card);
+    border-radius: 6px;
+    gap: 0.75rem;
+  }
+
+  .rank {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    font-weight: 700;
+    width: 15px;
+  }
+
+  .flag {
+    font-size: 1.2rem;
+  }
+
+  .country-name {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: white;
+    flex-grow: 1;
+  }
+
+  .attacks-badge {
+    background-color: rgba(244, 63, 94, 0.15);
+    color: var(--color-critical);
+    padding: 0.1rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    font-weight: 700;
+  }
+
+  .empty-leaderboard {
+    text-align: center;
+    padding: 3rem 1rem;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    border: 1px dashed var(--border-card);
+    border-radius: 6px;
+  }
+
+  /* Terminal Launcher Card */
+  .terminal-launcher-card {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 1.25rem 1.5rem;
+  }
+
+  .bg-terminal-glow {
+    background: linear-gradient(135deg, rgba(34, 211, 238, 0.03) 0%, rgba(5, 5, 8, 0.2) 100%);
+    border: 1px dashed rgba(34, 211, 238, 0.25);
+  }
+
+  .launcher-desc {
+    font-size: 0.8rem;
+    line-height: 1.5;
+    margin: 0.75rem 0;
+  }
+
+  .launcher-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 1rem;
+  }
+
+  .monitor-btn {
+    border: 1px solid var(--accent-primary);
+    box-shadow: 0 0 10px rgba(34, 211, 238, 0.2);
+  }
+
+  .status-indicator-inline {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+  }
+
+  /* Slide-Out Drawer Overlay */
+  .terminal-drawer-overlay {
+    position: fixed;
+    top: 0;
+    right: -100vw;
+    width: 100vw;
+    height: 100vh;
+    background-color: rgba(5, 5, 8, 0.75);
+    backdrop-filter: blur(5px);
+    z-index: 100;
+    display: flex;
+    justify-content: flex-end;
+    transition: right 0.35s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  }
+
+  .terminal-drawer-overlay.open {
+    right: 0;
+  }
+
+  .terminal-drawer {
+    width: 60%;
+    min-width: 780px;
+    height: 100%;
+    background-color: #050508;
+    border-left: 1px solid var(--border-card);
+    border-radius: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 1.5rem;
+    gap: 1rem;
+    box-shadow: -10px 0 30px rgba(0, 0, 0, 0.85);
+  }
+
+  .drawer-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--border-card);
+    padding-bottom: 0.85rem;
+  }
+
+  .drawer-hdr-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .close-drawer-btn {
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.15);
+  }
+
+  /* Controls Bar inside Drawer */
+  .terminal-controls {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background-color: #0b0c10;
+    border: 1px solid var(--border-card);
+    padding: 0.5rem 0.85rem;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .control-left {
+    display: flex;
+    align-items: center;
+    gap: 1.25rem;
+  }
+
+  .control-right {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .checkbox-container {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .checkbox-container input {
+    cursor: pointer;
+    width: 14px;
+    height: 14px;
+    accent-color: var(--accent-primary);
+  }
+
+  .limit-selector {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .control-txt {
+    color: var(--text-muted);
+  }
+
+  .select-limit {
+    padding: 0.2rem 0.4rem;
+    background-color: var(--bg-darker);
+    font-size: 0.78rem;
+  }
+
+  .custom-input-group {
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+  }
+
+  .custom-limit-input {
+    width: 60px;
+    padding: 0.15rem 0.3rem;
+    text-align: center;
+    font-size: 0.78rem;
+    background-color: var(--bg-darker);
+  }
+
+  .mb-label {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+  }
+
+  .db-size-indicator {
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--border-card);
+    padding: 0.25rem 0.6rem;
+    border-radius: 4px;
+    font-size: 0.78rem;
+  }
+
+  /* Terminal box inside drawer */
+  .terminal-box {
+    background-color: #050508;
+    border: 1px solid var(--border-card);
+    border-radius: 6px;
+    flex-grow: 1;
+    padding: 0.65rem;
+    box-shadow: inset 0 0 15px rgba(0, 0, 0, 0.95);
+    overflow: hidden;
+  }
+
+  .terminal-container {
+    width: 100%;
+    height: 100%;
+  }
+
+  .clear-terminal-btn {
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.08);
+  }
+
+  .clear-terminal-btn:hover {
+    background: rgba(255,255,255,0.03);
+  }
+</style>
