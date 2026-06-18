@@ -1,7 +1,7 @@
 use std::time::Duration;
 use serde::{Serialize, Deserialize};
 use tokio::sync::mpsc::Receiver;
-use crate::config::Config;
+
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct WafLogEntry {
@@ -21,9 +21,30 @@ pub struct Stats {
     pub rate_limited: i64,
 }
 
+use reqwest::header::{HeaderMap, HeaderValue};
+
+// Membuat HTTP Client dengan Header Autentikasi ClickHouse otomatis
+pub fn build_client() -> reqwest::Client {
+    let mut headers = HeaderMap::new();
+    if let Ok(user) = std::env::var("CLICKHOUSE_USER") {
+        if let Ok(val) = HeaderValue::from_str(&user) {
+            headers.insert("X-ClickHouse-User", val);
+        }
+    }
+    if let Ok(pass) = std::env::var("CLICKHOUSE_PASSWORD") {
+        if let Ok(val) = HeaderValue::from_str(&pass) {
+            headers.insert("X-ClickHouse-Key", val);
+        }
+    }
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 // Inisialisasi ClickHouse Table
 pub async fn init_db(clickhouse_url: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let client = reqwest::Client::new();
+    let client = build_client();
     let ddl = "
         CREATE TABLE IF NOT EXISTS request_log (
             timestamp DateTime64(3, 'UTC'),
@@ -38,8 +59,8 @@ pub async fn init_db(clickhouse_url: &str) -> Result<(), Box<dyn std::error::Err
         TTL toDateTime(timestamp) + INTERVAL 30 DAY DELETE
     ";
     
-    let url = format!("{}/?query={}", clickhouse_url.trim_end_matches('/'), urlencoding::encode(ddl));
-    let res = client.post(&url).send().await?;
+    let url = format!("{}/", clickhouse_url.trim_end_matches('/'));
+    let res = client.post(&url).body(ddl.to_string()).send().await?;
     if !res.status().is_success() {
         let err = res.text().await?;
         return Err(format!("ClickHouse init error: {}", err).into());
@@ -50,7 +71,7 @@ pub async fn init_db(clickhouse_url: &str) -> Result<(), Box<dyn std::error::Err
 
 // Mendapatkan statistik realtime dari ClickHouse
 pub async fn get_stats(clickhouse_url: &str, hours: u32) -> Result<Stats, Box<dyn std::error::Error + Send + Sync>> {
-    let client = reqwest::Client::new();
+    let client = build_client();
     let query = format!(
         "SELECT count(), countIf(action = 'BLOCK'), countIf(action = 'RATE_LIMIT') FROM request_log WHERE timestamp > now() - INTERVAL {} HOUR FORMAT TSV",
         hours
@@ -77,7 +98,7 @@ pub async fn get_stats(clickhouse_url: &str, hours: u32) -> Result<Stats, Box<dy
 
 // Mendapatkan jumlah disk usage dari ClickHouse Table
 pub async fn get_db_size(clickhouse_url: &str) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-    let client = reqwest::Client::new();
+    let client = build_client();
     let query = "SELECT total_bytes FROM system.tables WHERE name = 'request_log' FORMAT TSV";
     let url = format!("{}/?query={}", clickhouse_url.trim_end_matches('/'), urlencoding::encode(query));
     
@@ -90,9 +111,38 @@ pub async fn get_db_size(clickhouse_url: &str) -> Result<u64, Box<dyn std::error
     }
 }
 
+use std::fs::OpenOptions;
+use std::io::Write;
+
+fn write_to_local_log(entry: &WafLogEntry, log_dir: &str) {
+    let _ = std::fs::create_dir_all(log_dir);
+    let log_path = std::path::Path::new(log_dir).join("aegis.log");
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let line = format!(
+            "[{}] {} | {} | \"{}\" [{}] - {}\n",
+            entry.timestamp,
+            entry.client_ip,
+            entry.action,
+            entry.path,
+            entry.rule_id,
+            entry.reason
+        );
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
 // Worker untuk membaca channel log dan mengirimkannya secara batch ke ClickHouse
-pub async fn log_worker(mut rx: Receiver<WafLogEntry>, clickhouse_url: String, controller_url: Option<String>) {
-    let client = reqwest::Client::new();
+pub async fn log_worker(
+    mut rx: Receiver<WafLogEntry>,
+    clickhouse_url: String,
+    controller_url: Option<String>,
+    log_dir: String,
+) {
+    let client = build_client();
     let batch_interval = Duration::from_secs(1);
     let max_batch_size = 5000;
     
@@ -104,6 +154,8 @@ pub async fn log_worker(mut rx: Receiver<WafLogEntry>, clickhouse_url: String, c
         
         tokio::select! {
             Some(entry) = rx.recv() => {
+                write_to_local_log(&entry, &log_dir);
+                
                 batch.push(entry);
                 if batch.len() >= max_batch_size {
                     flush_logs(&batch, &clickhouse_url, &controller_url, &client).await;

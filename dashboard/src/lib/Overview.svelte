@@ -5,14 +5,21 @@
   export let controllerUrl = '';
 
   interface AgentNode {
-    name: string;
+    hostname: string;
     ip: string;
+    os: string;
     status: 'online' | 'offline';
-    rtt: string;
     uptime: string;
     cpu: number;
     ram: number;
     disk: number;
+    network_interfaces: string[];
+    discovered_services: {
+      name: string;
+      port: number;
+      protocol: string;
+      source: string;
+    }[];
   }
 
   interface VHost {
@@ -26,12 +33,7 @@
     rules: any[];
   }
 
-  // Labeled as "Simulated" in the UI (since there is no endpoint yet)
-  let agents: AgentNode[] = [
-    { name: 'Node-01-AsiaEast', ip: '10.142.0.4', status: 'online', rtt: '1.2ms', uptime: '18d 4h 12m', cpu: 14, ram: 42, disk: 18 },
-    { name: 'Node-02-USWest', ip: '192.168.1.15', status: 'online', rtt: '45ms', uptime: '9d 12h 5m', cpu: 8, ram: 31, disk: 24 }
-  ];
-
+  let agents: AgentNode[] = [];
   let vhosts: VHost[] = [];
   let totalRulesToggled = 0;
   let activeVhostsCount = 0;
@@ -67,6 +69,11 @@
       if (resBlocklist.ok) {
         blockedIps = await resBlocklist.json();
       }
+
+      const resAgents = await fetch(`${controllerUrl}/api/v1/agents`);
+      if (resAgents.ok) {
+        agents = await resAgents.json();
+      }
     } catch (e) {
       console.error("Failed to fetch system summary:", e);
     }
@@ -77,19 +84,6 @@
     summaryInterval = setInterval(fetchSystemSummary, 5000);
     
     updateInterval = setInterval(() => {
-      agents = agents.map(agent => {
-        if (agent.status === 'online') {
-          const cpuDelta = Math.floor(Math.random() * 7) - 3;
-          const ramDelta = Math.floor(Math.random() * 3) - 1;
-          return {
-            ...agent,
-            cpu: Math.max(2, Math.min(95, agent.cpu + cpuDelta)),
-            ram: Math.max(10, Math.min(90, agent.ram + ramDelta))
-          };
-        }
-        return agent;
-      });
-
       // Calculate reqsPerSec from global stats
       const currentTotal = $stats.total_requests;
       if (lastTotalRequests > 0) {
@@ -124,62 +118,110 @@
   </div>
 
   <!-- Agent Health Status cards -->
-  <h3 class="section-title">WAF Node Agent Diagnostics (Simulated)</h3>
-  <div class="grid-cols-2">
-    {#each agents as agent}
-      <div class="card agent-diagnostic-card">
-        <div class="agent-hdr">
-          <div class="agent-title-info">
-            <span class="dot {agent.status === 'online' ? 'online' : 'offline'}"></span>
-            <strong>{agent.name}</strong>
-            <span class="agent-ip-sub font-mono">({agent.ip})</span>
-          </div>
-          <div class="agent-uptime-badge font-mono">UPTIME: {agent.uptime}</div>
-        </div>
-
-        <div class="agent-diagnostics-grid">
-          <!-- CPU Gauge -->
-          <div class="diag-group">
-            <div class="diag-lbl-row">
-              <span class="diag-lbl">CPU Usage</span>
-              <span class="diag-val font-mono">{agent.cpu}%</span>
-            </div>
-            <div class="progress-bar-container">
-              <div class="progress-bar-fill fill-cpu" style="width: {agent.cpu}%"></div>
-            </div>
-          </div>
-
-          <!-- Memory Gauge -->
-          <div class="diag-group">
-            <div class="diag-lbl-row">
-              <span class="diag-lbl">RAM Usage</span>
-              <span class="diag-val font-mono">{agent.ram}%</span>
-            </div>
-            <div class="progress-bar-container">
-              <div class="progress-bar-fill fill-ram" style="width: {agent.ram}%"></div>
-            </div>
-          </div>
-
-          <!-- Disk Gauge -->
-          <div class="diag-group">
-            <div class="diag-lbl-row">
-              <span class="diag-lbl">Disk Storage</span>
-              <span class="diag-val font-mono">{agent.disk}%</span>
-            </div>
-            <div class="progress-bar-container">
-              <div class="progress-bar-fill fill-disk" style="width: {agent.disk}%"></div>
-            </div>
-          </div>
-
-          <!-- Ping Latency -->
-          <div class="diag-group text-center">
-            <span class="diag-lbl">Ping Latency</span>
-            <div class="latency-val font-mono text-pass">{agent.rtt}</div>
-          </div>
+  <h3 class="section-title">WAF Node Agent Diagnostics</h3>
+  {#if agents.length === 0}
+    <div class="card no-agents-card">
+      <div class="no-agents-content">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-warning">
+          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+          <line x1="12" y1="9" x2="12" y2="13"></line>
+          <line x1="12" y1="17" x2="12.01" y2="17"></line>
+        </svg>
+        <h4>No WAF Node Agents Connected</h4>
+        <p>Aegis WAF requires at least one Agent Node to inspect traffic. Install and connect an agent using this command on your target server:</p>
+        <div class="code-install-box font-mono">
+          <code>curl -sSL http://{window.location.hostname}:8080/install.sh | CONTROLLER_IP={window.location.hostname}:8080 bash</code>
         </div>
       </div>
-    {/each}
-  </div>
+    </div>
+  {:else}
+    <div class="grid-cols-2">
+      {#each agents as agent}
+        <div class="card agent-diagnostic-card">
+          <div class="agent-hdr">
+            <div class="agent-title-info">
+              <span class="dot {agent.status === 'online' ? 'online' : 'offline'}"></span>
+              <strong>{agent.hostname}</strong>
+              <span class="agent-ip-sub font-mono">({agent.ip})</span>
+            </div>
+            <div class="agent-uptime-badge font-mono">UPTIME: {agent.uptime}</div>
+          </div>
+
+          <div class="agent-diagnostics-grid">
+            <!-- CPU Gauge -->
+            <div class="diag-group">
+              <div class="diag-lbl-row">
+                <span class="diag-lbl">CPU Usage</span>
+                <span class="diag-val font-mono">{Math.round(agent.cpu)}%</span>
+              </div>
+              <div class="progress-bar-container">
+                <div class="progress-bar-fill fill-cpu" style="width: {agent.cpu}%"></div>
+              </div>
+            </div>
+
+            <!-- Memory Gauge -->
+            <div class="diag-group">
+              <div class="diag-lbl-row">
+                <span class="diag-lbl">RAM Usage</span>
+                <span class="diag-val font-mono">{Math.round(agent.ram)}%</span>
+              </div>
+              <div class="progress-bar-container">
+                <div class="progress-bar-fill fill-ram" style="width: {agent.ram}%"></div>
+              </div>
+            </div>
+
+            <!-- Disk Gauge -->
+            <div class="diag-group">
+              <div class="diag-lbl-row">
+                <span class="diag-lbl">Disk Storage</span>
+                <span class="diag-val font-mono">{Math.round(agent.disk)}%</span>
+              </div>
+              <div class="progress-bar-container">
+                <div class="progress-bar-fill fill-disk" style="width: {agent.disk}%"></div>
+              </div>
+            </div>
+
+            <!-- OS Platform -->
+            <div class="diag-group text-center">
+              <span class="diag-lbl">Platform</span>
+              <div class="latency-val font-mono text-pass" style="text-transform: capitalize; font-size: 0.9rem;">{agent.os}</div>
+              {#if agent.network_interfaces && agent.network_interfaces.length > 0}
+                <div style="margin-top: 0.5rem;">
+                  <span class="diag-lbl" style="display:block; margin-bottom: 0.2rem; font-size: 0.65rem;">eBPF Interface</span>
+                  <select class="interface-select font-mono">
+                    {#each agent.network_interfaces as iface}
+                      <option value={iface}>{iface}</option>
+                    {/each}
+                  </select>
+                </div>
+              {/if}
+            </div>
+          </div>
+
+          <!-- Discovered Services -->
+          {#if agent.discovered_services && agent.discovered_services.length > 0}
+            <div class="discovered-services-container">
+              <h4 class="services-title">Discovered Services</h4>
+              <div class="services-grid">
+                {#each agent.discovered_services as svc}
+                  <div class="service-card">
+                    <span class="service-icon">{svc.source === 'Docker' ? '🐳' : '🔌'}</span>
+                    <div class="service-info">
+                      <span class="service-name font-mono">{svc.name}</span>
+                      <span class="service-port font-mono">{svc.port}/{svc.protocol}</span>
+                    </div>
+                    <button class="protect-btn" title="Create Virtual Host">
+                      Protect
+                    </button>
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/if}
+        </div>
+      {/each}
+    </div>
+  {/if}
 
   <!-- Configuration Summary and Disk Storage -->
   <div class="grid-cols-2">
@@ -657,5 +699,143 @@
     border-radius: 2px;
     margin-left: 8px;
     letter-spacing: 0.5px;
+  }
+
+  .no-agents-card {
+    grid-column: span 2;
+    padding: 3rem 2rem;
+    text-align: center;
+    border: 1px solid rgba(244, 63, 94, 0.2);
+    background: linear-gradient(135deg, rgba(244, 63, 94, 0.03) 0%, rgba(5, 5, 8, 0.4) 100%);
+    box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+  }
+
+  .no-agents-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    max-width: 600px;
+    margin: 0 auto;
+  }
+
+  .icon-warning {
+    width: 48px;
+    height: 48px;
+    color: var(--color-critical);
+    margin-bottom: 1.5rem;
+    filter: drop-shadow(0 0 8px rgba(244, 63, 94, 0.4));
+  }
+
+  .no-agents-content h4 {
+    font-size: 1.25rem;
+    color: #fff;
+    margin-bottom: 0.75rem;
+    font-weight: 700;
+  }
+
+  .no-agents-content p {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    line-height: 1.5;
+    margin-bottom: 1.5rem;
+  }
+
+  .code-install-box {
+    background-color: #0b0b10;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    padding: 1rem 1.5rem;
+    width: 100%;
+    text-align: left;
+    overflow-x: auto;
+    position: relative;
+  }
+
+  .code-install-box code {
+    color: var(--color-pass);
+    font-size: 0.85rem;
+    white-space: nowrap;
+  }
+
+  .interface-select {
+    background: rgba(0,0,0,0.3);
+    border: 1px solid rgba(255,255,255,0.1);
+    color: white;
+    font-size: 0.7rem;
+    padding: 0.2rem 0.4rem;
+    border-radius: 4px;
+    width: 100%;
+  }
+
+  .discovered-services-container {
+    margin-top: 1.25rem;
+    padding-top: 1rem;
+    border-top: 1px dashed rgba(255,255,255,0.05);
+  }
+
+  .services-title {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    margin: 0 0 0.75rem 0;
+    letter-spacing: 0.5px;
+  }
+
+  .services-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 0.75rem;
+  }
+
+  .service-card {
+    display: flex;
+    align-items: center;
+    background: rgba(255,255,255,0.02);
+    border: 1px solid rgba(255,255,255,0.05);
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    gap: 0.75rem;
+  }
+
+  .service-icon {
+    font-size: 1.2rem;
+  }
+
+  .service-info {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+  }
+
+  .service-name {
+    font-size: 0.75rem;
+    color: white;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100px;
+  }
+
+  .service-port {
+    font-size: 0.65rem;
+    color: var(--text-muted);
+  }
+
+  .protect-btn {
+    background: rgba(16, 185, 129, 0.1);
+    color: var(--color-pass);
+    border: 1px solid rgba(16, 185, 129, 0.2);
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.65rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .protect-btn:hover {
+    background: rgba(16, 185, 129, 0.2);
+    border-color: rgba(16, 185, 129, 0.4);
   }
 </style>

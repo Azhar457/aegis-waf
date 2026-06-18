@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 description = "Pure Layer 7 WAF - Homelab Edition"
 
+[workspace]
+members = [
+    "aegis-ebpf",
+    "xtask",
+]
+
 [dependencies]
 axum = { version = "0.7", features = ["macros", "ws"] }
 tokio = { version = "1", features = ["full"] }
@@ -30,8 +36,27 @@ clap = { version = "4.6.1", features = ["derive"] }
 reqwest = { version = "0.12", features = ["json"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 urlencoding = "2.1.3"
+sysinfo = "0.30.12"
+tokio-tungstenite = "0.21.0"
+
 
 
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.27", features = ["user"] } # for privilege dropping
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = { git = "https://github.com/aya-rs/aya", branch = "main" }
+aya-log = { git = "https://github.com/aya-rs/aya", branch = "main" }
+
+[profile.dev.package.aegis-ebpf]
+opt-level = "s"
+debug = false
+debug-assertions = false
+overflow-checks = false
+
+[profile.release.package.aegis-ebpf]
+opt-level = "s"
+debug = false
+debug-assertions = false
+overflow-checks = false

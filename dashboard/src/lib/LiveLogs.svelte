@@ -185,6 +185,10 @@
       actionColor = "\x1b[1;33m";
     } else if (act === 'REDIRECT') {
       actionColor = "\x1b[1;34m"; // Bold Blue for custom redirect
+    } else if (act === 'PASS') {
+      actionColor = "\x1b[1;32m"; // Bold Green for passed requests
+    } else if (act === 'ERROR') {
+      actionColor = "\x1b[1;35m"; // Bold Magenta/Purple for errors
     }
 
     return `\x1b[90m[${ts}]\x1b[0m \x1b[32m${ip}\x1b[0m ${actionColor}| ${act} |\x1b[0m \x1b[36m"${path}"\x1b[0m \x1b[33m[${rId}]\x1b[0m \x1b[37m- ${reason}\x1b[0m`;
@@ -230,7 +234,36 @@
 
   $: {
     if (showTerminal && fitAddon && terminalDiv) {
-      setTimeout(() => fitAddon?.fit(), 50); // M4 Fix: give drawer time to open before fitting
+      // Fit initially, and again after transition completes
+      setTimeout(() => {
+        if (showTerminal && terminalDiv && terminalDiv.clientWidth > 0) {
+          try {
+            fitAddon?.fit();
+          } catch (e) {
+            console.warn(e);
+          }
+        }
+      }, 360);
+    }
+  }
+
+  function handleResize() {
+    if (showTerminal && fitAddon && terminalDiv && terminalDiv.clientWidth > 0 && terminalDiv.clientHeight > 0) {
+      try {
+        fitAddon.fit();
+      } catch (e) {
+        console.warn(e);
+      }
+    }
+  }
+
+  function handleTransitionEnd(event: TransitionEvent) {
+    if (showTerminal && fitAddon && terminalDiv && event.propertyName === 'right' && terminalDiv.clientWidth > 0 && terminalDiv.clientHeight > 0) {
+      try {
+        fitAddon.fit();
+      } catch (e) {
+        console.warn(e);
+      }
     }
   }
 
@@ -246,6 +279,7 @@
 
   onMount(async () => {
     isDestroyed = false;
+    window.addEventListener('resize', handleResize);
 
     // Trend simulation calculation based on global stats
     trendInterval = setInterval(() => {
@@ -347,8 +381,12 @@
 
     // M4 Fix: handle browser resize properly
     resizeObserver = new ResizeObserver(() => {
-      if (showTerminal) {
-        fitAddon?.fit();
+      if (showTerminal && terminalDiv && terminalDiv.clientWidth > 0 && terminalDiv.clientHeight > 0) {
+        try {
+          fitAddon?.fit();
+        } catch (e) {
+          console.warn(e);
+        }
       }
     });
     resizeObserver.observe(terminalDiv);
@@ -386,6 +424,7 @@
 
   onDestroy(() => {
     isDestroyed = true;
+    window.removeEventListener('resize', handleResize);
     if (flushInterval) clearInterval(flushInterval);
     if (dbSizeInterval) clearInterval(dbSizeInterval);
     if (trendInterval) clearInterval(trendInterval);
@@ -424,7 +463,7 @@
     <div class="card animate-fade-in">
       <div class="card-title">Legitimate Requests</div>
       <div class="card-value text-pass font-bold">
-        {formatCount($stats.total_requests)}
+        {formatCount($stats.total_requests - $stats.blocked - $stats.rate_limited)}
       </div>
       <div class="card-subtext">
         <span class="dot online"></span> Active traffic passing WAF proxy
@@ -569,7 +608,7 @@
   </div>
 
   <!-- Slide-Out Terminal Drawer Overlay -->
-  <div class="terminal-drawer-overlay {showTerminal ? 'open' : ''}">
+  <div on:transitionend={handleTransitionEnd} class="terminal-drawer-overlay {showTerminal ? 'open' : ''}">
     <div class="terminal-drawer card">
       <div class="drawer-header">
         <div class="drawer-hdr-title">

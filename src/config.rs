@@ -6,7 +6,18 @@ use toml;
 pub struct Config {
     pub global: GlobalConfig,
     pub tls: TlsConfig,
+    #[serde(default)]
+    pub rate_limit_policies: Vec<RateLimitPolicy>,
     pub vhosts: Vec<VHost>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RateLimitPolicy {
+    pub name: String,
+    pub limit: String,
+      pub burst: u32,
+      pub path: String,
+      pub description: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -16,6 +27,8 @@ pub struct GlobalConfig {
     pub max_body_size: usize,
     pub default_rate_limit: u32,
     pub log_dir: String,
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -75,6 +88,10 @@ fn default_max_body() -> String {
 
 fn default_rate_limit_str() -> String {
     "600 req/min".to_string()
+}
+
+fn default_log_level() -> String {
+    "security".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

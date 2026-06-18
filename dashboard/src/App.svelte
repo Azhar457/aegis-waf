@@ -7,7 +7,7 @@
   import RateLimiting from './lib/RateLimiting.svelte';
   import { initGlobalStore, cleanupGlobalStore, connectionStatus, stats } from './lib/stores';
 
-  const controllerUrl = 'http://localhost:8080';
+  const controllerUrl = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8080';
   let activeTab = 'overview';
 
   onMount(() => {
@@ -118,7 +118,7 @@
         <RuleEngine {controllerUrl} />
       {/if}
       {#if activeTab === 'rate_limits'}
-        <RateLimiting />
+        <RateLimiting {controllerUrl} />
       {/if}
     </section>
   </main>

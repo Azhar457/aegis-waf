@@ -5,7 +5,7 @@ pub mod body;
 use std::collections::HashMap;
 use dashmap::DashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
+
 use tokio::time::Instant;
 use once_cell::sync::Lazy;
 use crate::config::Config;
@@ -60,11 +60,55 @@ pub struct RuleEngine {}
 struct TokenBucket {
     tokens: f64,
     last_check: Instant,
+    last_access: Instant,
     rate: f64, // tokens per second
     capacity: f64,
 }
 
 static RATE_LIMITER: Lazy<DashMap<IpAddr, TokenBucket>> = Lazy::new(DashMap::new);
+static BLOCKED_COUNTERS: Lazy<DashMap<IpAddr, (u32, Instant)>> = Lazy::new(DashMap::new);
+
+pub fn record_block(ip: IpAddr) -> bool {
+    let now = Instant::now();
+    let mut entry = BLOCKED_COUNTERS.entry(ip).or_insert((0, now));
+    let (count, first_seen) = entry.value_mut();
+    
+    if now.duration_since(*first_seen).as_secs() > 300 {
+        *count = 1;
+        *first_seen = now;
+    } else {
+        *count += 1;
+    }
+    
+    if *count >= 5 {
+        let ip_clone = ip;
+        tokio::spawn(async move {
+            if let Ok(mut xdp) = crate::XDP_MANAGER.try_lock() {
+                if let IpAddr::V4(v4) = ip_clone {
+                    let _ = xdp.block_ip(v4);
+                }
+            }
+        });
+        true
+    } else {
+        false
+    }
+}
+
+pub fn start_rate_limiter_cleanup() {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+            let now = Instant::now();
+            RATE_LIMITER.retain(|_, bucket| {
+                now.duration_since(bucket.last_access).as_secs() < 300
+            });
+            BLOCKED_COUNTERS.retain(|_, (_, first_seen)| {
+                now.duration_since(*first_seen).as_secs() < 300
+            });
+        }
+    });
+}
 
 impl RuleEngine {
     pub fn new(_cfg: &Config) -> Self {
@@ -191,11 +235,20 @@ impl RuleEngine {
         let mut bucket = RATE_LIMITER.entry(ip).or_insert_with(|| TokenBucket {
             tokens: capacity,
             last_check: Instant::now(),
+            last_access: Instant::now(),
             rate,
             capacity,
         });
 
+        // Sync parameters dynamically if configuration has changed
+        if (bucket.rate - rate).abs() > f64::EPSILON || (bucket.capacity - capacity).abs() > f64::EPSILON {
+            bucket.rate = rate;
+            bucket.capacity = capacity;
+            bucket.tokens = bucket.tokens.min(capacity);
+        }
+
         let now = Instant::now();
+        bucket.last_access = now;
         let elapsed = now.duration_since(bucket.last_check).as_secs_f64();
         bucket.last_check = now;
 
@@ -225,12 +278,14 @@ mod tests {
                 max_body_size: 1024,
                 default_rate_limit: 100,
                 log_dir: "./logs".to_string(),
+                log_level: "security".to_string(),
             },
             tls: TlsConfig {
                 mode: "local_ca".to_string(),
                 cert_dir: "./certs".to_string(),
             },
             vhosts: vec![],
+            rate_limit_policies: vec![],
         }
     }
 

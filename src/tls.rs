@@ -3,11 +3,13 @@ use std::path::Path;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use rcgen::{CertificateParams, KeyPair, IsCa, BasicConstraints, KeyUsagePurpose, ExtendedKeyUsagePurpose};
 
+#[allow(dead_code)]
 pub struct LocalCA {
     cert_path: String,
     key_path: String,
 }
 
+#[allow(dead_code)]
 impl LocalCA {
     pub fn new(cert_dir: &str) -> Self {
         Self {

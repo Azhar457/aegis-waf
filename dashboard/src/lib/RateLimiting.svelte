@@ -1,10 +1,17 @@
 <script lang="ts">
-  let limitTiers = [
-    { name: "Default API/Website Traffic", limit: "600 requests / minute", burst: 100, path: "/*", description: "Default threshold protecting backend sites from general automated scans." },
-    { name: "Authentication Endpoints", limit: "10 requests / minute", burst: 5, path: "/login, /api/auth/*", description: "Aggressive brute-force protection preventing credentials guessing." },
-    { name: "WebDAV / Cloud File Storage", limit: "2000 requests / minute", burst: 200, path: "/remote.php/dav/*, /api/upload/*", description: "Permissive tier optimized for photo synching and Nextcloud/Immich desktop clients." },
-    { name: "Static Assets & Media", limit: "Unlimited", burst: 0, path: "/static/*, *.css, *.js, *.png", description: "Exempted assets to reduce WAF engine evaluation overhead." }
-  ];
+  import { onMount } from 'svelte';
+
+  export let controllerUrl = '';
+
+  interface RateLimitPolicy {
+    name: string;
+    limit: string;
+    burst: number;
+    path: string;
+    description: string;
+  }
+
+  let limitTiers: RateLimitPolicy[] = [];
 
   let showModal = false;
   let newTierName = "";
@@ -13,16 +20,49 @@
   let newPathPattern = "";
   let newDescription = "";
 
-  function handleAddTier() {
+  async function fetchPolicies() {
+    try {
+      const res = await fetch(`${controllerUrl}/api/v1/rate-limits`);
+      if (res.ok) {
+        limitTiers = await res.json();
+      }
+    } catch (e) {
+      console.error("Failed to fetch rate limit policies:", e);
+    }
+  }
+
+  async function savePolicies(updatedTiers: RateLimitPolicy[]) {
+    try {
+      const res = await fetch(`${controllerUrl}/api/v1/rate-limits`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(updatedTiers)
+      });
+      if (res.ok) {
+        limitTiers = updatedTiers;
+      } else {
+        console.error("Failed to save policies on controller:", res.statusText);
+      }
+    } catch (e) {
+      console.error("Error saving policies:", e);
+    }
+  }
+
+  async function handleAddTier() {
     if (!newTierName || !newLimit) return;
 
-    limitTiers = [...limitTiers, {
+    const newPolicy: RateLimitPolicy = {
       name: newTierName,
       limit: newLimit,
       burst: newBurst,
       path: newPathPattern || "/*",
       description: newDescription
-    }];
+    };
+
+    const updated = [...limitTiers, newPolicy];
+    await savePolicies(updated);
 
     // Reset Form
     newTierName = "";
@@ -32,6 +72,17 @@
     newDescription = "";
     showModal = false;
   }
+
+  async function handleDeleteTier(index: number) {
+    if (confirm(`Are you sure you want to delete policy: ${limitTiers[index].name}?`)) {
+      const updated = limitTiers.filter((_, idx) => idx !== index);
+      await savePolicies(updated);
+    }
+  }
+
+  onMount(() => {
+    fetchPolicies();
+  });
 </script>
 
 <div class="rate-limit-panel">
@@ -41,7 +92,7 @@
   </div>
 
   <div class="tier-list">
-    {#each limitTiers as tier}
+    {#each limitTiers as tier, index}
       <div class="card tier-card">
         <div class="tier-header">
           <div class="tier-meta">
@@ -51,8 +102,9 @@
           <span class="limit-badge">{tier.limit}</span>
         </div>
         <p class="tier-desc">{tier.description}</p>
-        <div class="tier-footer">
+        <div class="tier-footer" style="display: flex; justify-content: space-between; align-items: center;">
           <span class="detail font-mono">Burst Capacity: {tier.burst > 0 ? `${tier.burst} tokens` : 'N/A'}</span>
+          <button on:click={() => handleDeleteTier(index)} class="btn-critical-outline btn-sm">Delete</button>
         </div>
       </div>
     {/each}
@@ -274,5 +326,19 @@
     gap: 0.75rem;
     border-top: 1px solid var(--border-card);
     padding-top: 1.25rem;
+  }
+
+  .btn-critical-outline {
+    background: transparent;
+    border: 1px solid rgba(244, 63, 94, 0.4);
+    color: var(--color-critical);
+    cursor: pointer;
+    border-radius: 4px;
+    transition: all 0.2s;
+  }
+
+  .btn-critical-outline:hover {
+    background: rgba(244, 63, 94, 0.1);
+    border-color: var(--color-critical);
   }
 </style>

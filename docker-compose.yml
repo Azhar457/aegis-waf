@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: aegis_controller
+    command: ["/app/aegis-waf", "controller"]
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -11,7 +12,7 @@ services:
       - RUST_LOG=info
       - CLICKHOUSE_URL=http://clickhouse:8123
       - CLICKHOUSE_USER=default
-      - CLICKHOUSE_PASSWORD=
+      - CLICKHOUSE_PASSWORD=aegis
     volumes:
       - ./config.toml:/app/config.toml
     depends_on:
@@ -22,6 +23,10 @@ services:
     image: clickhouse/clickhouse-server:latest
     container_name: aegis_clickhouse
     restart: unless-stopped
+    environment:
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=aegis
+      - CLICKHOUSE_DB=default
     ports:
       - "8123:8123" # HTTP Interface for Controller
       - "9000:9000" # Native Interface

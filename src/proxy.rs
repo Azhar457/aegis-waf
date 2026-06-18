@@ -16,10 +16,16 @@ pub async fn forward_request(
     req: Request<Body>,
 ) -> Response<Body> {
     // Read config inside a block to ensure RwLockReadGuard does not cross await boundaries
-    let (backend_addr, vhost_cfg, global_max_body_size, global_default_rate_limit) = {
+    let (backend_addr, vhost_cfg, global_max_body_size, global_default_rate_limit, log_level) = {
         let config_lock = state.config.read().unwrap();
         let (b, v) = vhost::match_vhost(host.as_ref(), &*config_lock);
-        (b.to_string(), v.clone(), config_lock.global.max_body_size, config_lock.global.default_rate_limit)
+        (
+            b.to_string(),
+            v.clone(),
+            config_lock.global.max_body_size,
+            config_lock.global.default_rate_limit,
+            config_lock.global.log_level.to_lowercase(),
+        )
     };
 
     // Extract real client IP (check X-Forwarded-For first, fallback to TCP peer address)
@@ -52,12 +58,12 @@ pub async fn forward_request(
             timestamp: chrono::Utc::now().to_rfc3339(),
             client_ip: client_ip.to_string(),
             method: method.as_str().to_string(),
-            path: path.clone(),
+            path: path_and_query.clone(),
             action: "BLOCK".to_string(),
             rule_id: "COLLAB-001".to_string(),
             reason: "Blocked by Aegis WAF Collaborative Threat Intelligence (Reputation)".to_string(),
         };
-        let _ = state.log_tx.send(entry).await;
+        let _ = state.log_tx.try_send(entry);
         return (StatusCode::FORBIDDEN, "Blocked by Aegis WAF Collaborative Threat Intelligence").into_response();
     }
 
@@ -74,7 +80,7 @@ pub async fn forward_request(
             timestamp: chrono::Utc::now().to_rfc3339(),
             client_ip: client_ip.to_string(),
             method: method.as_str().to_string(),
-            path: path.clone(),
+            path: path_and_query.clone(),
             action: "BLOCK".to_string(),
             rule_id: "GEO-001".to_string(),
             reason: format!(
@@ -82,7 +88,7 @@ pub async fn forward_request(
                 vhost_cfg.geoblock_type, country
             ),
         };
-        let _ = state.log_tx.send(entry).await;
+        let _ = state.log_tx.try_send(entry);
         return (StatusCode::FORBIDDEN, format!("Blocked by Aegis WAF Geoblock: Access restricted for {}", country)).into_response();
     }
 
@@ -142,12 +148,12 @@ pub async fn forward_request(
                         timestamp: chrono::Utc::now().to_rfc3339(),
                         client_ip: client_ip.to_string(),
                         method: method.as_str().to_string(),
-                        path: path.clone(),
+                        path: path_and_query.clone(),
                         action: "REDIRECT".to_string(),
                         rule_id: rule.id.clone(),
                         reason: format!("Redirected by Custom Rule [{}]: to {}", rule.name, rule.action_value),
                     };
-                    let _ = state.log_tx.send(entry).await;
+                    let _ = state.log_tx.try_send(entry);
 
                     return Response::builder()
                         .status(StatusCode::FOUND)
@@ -160,12 +166,12 @@ pub async fn forward_request(
                         timestamp: chrono::Utc::now().to_rfc3339(),
                         client_ip: client_ip.to_string(),
                         method: method.as_str().to_string(),
-                        path: path.clone(),
+                        path: path_and_query.clone(),
                         action: "BLOCK".to_string(),
                         rule_id: rule.id.clone(),
                         reason: format!("Blocked by Custom Rule [{}]: {}", rule.name, rule.condition_value),
                     };
-                    let _ = state.log_tx.send(entry).await;
+                    let _ = state.log_tx.try_send(entry);
                     return (StatusCode::FORBIDDEN, format!("Blocked by Aegis WAF Custom Rule: {}", rule.name)).into_response();
                 }
             }
@@ -188,12 +194,21 @@ pub async fn forward_request(
             timestamp: chrono::Utc::now().to_rfc3339(),
             client_ip: client_ip.to_string(),
             method: method.as_str().to_string(),
-            path: path.clone(),
+            path: path_and_query.clone(),
             action: "BLOCK".to_string(),
             rule_id,
             reason: msg.clone(),
         };
-        let _ = state.log_tx.send(entry).await;
+        // Record block in reputation counter
+        if crate::rules::record_block(client_ip) {
+            if let Ok(mut lock) = state.blocklist.write() {
+                if lock.insert(client_ip) {
+                    tracing::warn!("IP {} blocked multiple times, added to in-memory blocklist (Reputation)", client_ip);
+                }
+            }
+        }
+        
+        let _ = state.log_tx.try_send(entry);
         return (StatusCode::FORBIDDEN, format!("Blocked by Aegis WAF: {msg}")).into_response();
     }
 
@@ -213,12 +228,12 @@ pub async fn forward_request(
             timestamp: chrono::Utc::now().to_rfc3339(),
             client_ip: client_ip.to_string(),
             method: method.as_str().to_string(),
-            path: path.clone(),
+            path: path_and_query.clone(),
             action: "RATE_LIMIT".to_string(),
             rule_id: "RL-001".to_string(),
             reason: "Rate limit exceeded".to_string(),
         };
-        let _ = state.log_tx.send(entry).await;
+        let _ = state.log_tx.try_send(entry);
         return (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded").into_response();
     }
 
@@ -228,7 +243,7 @@ pub async fn forward_request(
     let uri = format!("http://{}{}", backend_addr_parsed, path_and_query);
 
     let mut backend_req = Request::builder()
-        .method(method)
+        .method(method.clone())
         .uri(&uri);
     for (key, value) in &headers_map {
         backend_req = backend_req.header(key.as_str(), value.as_str());
@@ -237,11 +252,36 @@ pub async fn forward_request(
 
     match client.request(backend_req).await {
         Ok(resp) => {
+            if log_level == "verbose" || log_level == "all" {
+                let status = resp.status();
+                let entry = crate::logging::WafLogEntry {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    client_ip: client_ip.to_string(),
+                    method: method.as_str().to_string(),
+                    path: path_and_query.clone(),
+                    action: "PASS".to_string(),
+                    rule_id: "ALLOW".to_string(),
+                    reason: format!("Response status: {}", status.as_u16()),
+                };
+                let _ = state.log_tx.try_send(entry);
+            }
             // Convert hyper response to axum response
             let (parts, body) = resp.into_parts();
             Response::from_parts(parts, Body::new(body))
         }
         Err(e) => {
+            if log_level == "verbose" || log_level == "all" || log_level == "anomaly" || log_level == "errors" {
+                let entry = crate::logging::WafLogEntry {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    client_ip: client_ip.to_string(),
+                    method: method.as_str().to_string(),
+                    path: path_and_query.clone(),
+                    action: "ERROR".to_string(),
+                    rule_id: "SYS-502".to_string(),
+                    reason: format!("Backend connection failed: {e}"),
+                };
+                let _ = state.log_tx.try_send(entry);
+            }
             (StatusCode::BAD_GATEWAY, format!("Backend error: {}", e)).into_response()
         }
     }
@@ -256,7 +296,8 @@ pub fn resolve_ip_country(ip: &std::net::IpAddr) -> &'static str {
     // Simple deterministic hash
     let mut hash: i32 = 0;
     for c in ip_str.chars() {
-        hash = c as i32 + ((hash << 5) - hash);
+        let val = c as i32;
+        hash = hash.wrapping_shl(5).wrapping_sub(hash).wrapping_add(val);
     }
     
     let countries = ["US", "DE", "RU", "CN", "SG", "ID", "BR", "AU"];
