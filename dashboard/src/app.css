@@ -127,6 +127,11 @@ body {
   border-radius: 8px;
   cursor: pointer;
   font-weight: 500;
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  text-align: left;
+  width: 100%;
+  background: none;
   transition: all 0.2s ease-in-out;
   border: 1px solid transparent;
   user-select: none;

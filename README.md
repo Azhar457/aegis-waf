@@ -1,190 +1,145 @@
-# 🛡️ Aegis WAF — Next Gen Layer 7 Web Application Firewall
+# 🛡️ Aegis WAF (Web Application Firewall)
 
-Aegis WAF is a pure, ultra-fast **Reverse Proxy + Rule Engine + Virtual Host Router** built in Rust for high-throughput network environments (like homelabs and enterprise portals). It features a real-time, terminal-like dashboard built in Svelte to monitor attacks, manage virtual hosts, toggle rules, and configure log limits dynamically.
+Aegis WAF adalah project *Proof of Concept* (PoC) Web Application Firewall modern yang dibangun menggunakan **Rust** (Backend Proxy & Controller) dan **Svelte** (Frontend Dashboard).
+
+Project ini dirancang sebagai WAF *reverse proxy* yang ringan, berkecepatan tinggi, dan mampu menyajikan log penyerangan secara *real-time* dengan visualisasi yang futuristik. 
+
+## 🏗️ Architecture Diagram
+
+```mermaid
+flowchart LR
+    %% Clients & Sources
+    subgraph Sources [Log Sources & Traffic]
+        Clients((Web Clients))
+        Bots((Malicious Bots))
+    end
+
+    %% WAF Agent
+    subgraph Agent [Aegis WAF Agent Node]
+        WAF_Engine{Aegis Security Engine}
+        Rules[Pattern Matching / SQLi / XSS]
+        RateLimit[Rate Limiting]
+        WAF_Engine --> Rules
+        WAF_Engine --> RateLimit
+    end
+
+    %% Web Servers
+    subgraph Targets [Protected Targets]
+        Nginx[NGINX]
+        Apache[Apache]
+        NodeJS[Node.js]
+    end
+
+    %% Central Brain
+    subgraph Central [Aegis Central Controller]
+        API(REST API)
+        WebSocket(Realtime Broadcast)
+        Reputation[Reputation Blocklist Sync]
+    end
+    
+    %% Analytics
+    subgraph Data [Analytics & Storage]
+        ClickHouse[(ClickHouse DB)]
+    end
+
+    %% Dashboard
+    subgraph UI [Online Console]
+        Dashboard([Svelte Real-Time Dashboard])
+    end
+
+    %% Connections
+    Clients -- "HTTP Requests" --> WAF_Engine
+    Bots -- "Malicious Payloads" --> WAF_Engine
+
+    WAF_Engine -- "Clean Traffic" --> Targets
+    WAF_Engine -. "Block Bad IPs" .-> Bots
+
+    WAF_Engine -- "Stream Logs & Stats" --> API
+    API --> ClickHouse
+
+    ClickHouse -. "Distribute Blocklist" .-> Reputation
+    Reputation -. "Sync Rules" .-> WAF_Engine
+
+    ClickHouse -- "Query Logs" --> API
+    API -- "SSE / WS" --> WebSocket
+    WebSocket -- "Live Alerts & Metrics" --> Dashboard
+```
+
+## ✨ Pros (Kelebihan & Keunggulan)
+
+- **High-Performance Rust Proxy**: Menggunakan `tokio`, `axum`, dan `hyper`. Proxy didesain secara asinkron (async) tanpa proses blocking pada *hot path*, sehingga overhead latensi analisis WAF sangat kecil.
+- **Enterprise-Ready Database (ClickHouse)**: Kini Aegis beralih sepenuhnya ke **ClickHouse**. Semua *log* dan *metrics* disiram melalui *batching* (`JSONEachRow`) ke arsitektur analitik terdistribusi, menghilangkan *bottleneck* I/O pada SQLite.
+- **Real-Time Data Streaming**: Dashboard menggunakan Svelte Stores dan `Server-Sent Events (SSE)`. Log penyerangan akan dirender secara hardware-accelerated di UI melalui `@xterm/xterm` tanpa menyebabkan *freeze* pada browser meskipun pada saat terjadi DDoS.
+- **Modern & Beautiful UI**: Antarmuka dashboard didesain seperti terminal pengawasan (NOC) yang dilengkapi peta lalu-lintas jaringan (SVG Attack Map), Svelte stores reactivity, dan animasi micro-interactions.
+- **Reputation Blocklist Engine**: Mendeteksi IP nakal yang melebihi limit blokir secara konstan dan mem- *ban* IP tersebut di seluruh node Agent WAF.
 
 ---
 
-## ✨ Features
+## ⚠️ Cons & Limitations (Kekurangan Secara Jujur)
 
-- **Reverse Proxy Engine**: Built on Axum and Hyper, supporting WebSockets, HTTP/1.1, and proxying headers (`X-Real-IP`, `X-Forwarded-For`).
-- **Dynamic Virtual Host Routing**: Route wildcard domains (e.g. `*.mydomain.id`) to different upstream ports without reloading services.
-- **WAF Rule Engine (35+ Rules)**: Checks requests across 4 phases (Headers, URI, Query, Request Body) for SQL Injection, Cross-Site Scripting (XSS), Local File Inclusion (LFI), SSRF, Command Injection, and Scanners.
-- **Stateless/Persistent Rate Limiting**: Token-bucket algorithm applied globally and per path, persisting across client requests.
-- **SafeLine-Style Log Terminal**: High-frequency real-time SSE stream log view resembling a monospace terminal, optimized for millions of requests.
-- **Log Pruning & Exporting**: Custom capacity settings (500MB, 1024MB, Custom) with automated database pruning to protect storage from overflowing during NMAP scans.
+Walaupun tampilan terlihat canggih, mohon diperhatikan bahwa project ini **belum sepenuhnya siap untuk production** dan masih memiliki banyak *mockup* serta keterbatasan teknis:
 
----
+1. **Dashboard Rate Limiting Hanya Mockup**: 
+   UI konfigurasi *Rate Limiting Tiers* (Default, Auth, WebDAV, dll) saat ini **100% hardcoded (palsu)**. Backend Rust baru mendukung *Rate Limiting* sederhana berupa batas RPM (*Requests Per Minute*) global atau per *virtual host*. Tidak ada penyimpanan tier di database.
+   
+2. **Metrik Node Agent Adalah Simulasi (Palsu)**: 
+   Panel "WAF Node Agent Diagnostics" di dashboard yang menampilkan informasi penggunaan CPU, RAM, Disk, dan Uptime saat ini hanya **menggunakan fungsi matematika `Math.random()` di Svelte**. Belum ada integrasi eBPF atau `sysinfo` untuk mengukur *hardware usage* secara nyata.
 
-## 🏗️ Architecture
-
-- **Controller Mode**: Runs the Svelte web panel, aggregates logs into SQLite, handles stats, config exports, and serves endpoints on port `8080`.
-- **Agent Mode**: Runs the actual packet parser, WAF rule inspector, rate limiter, and reverse proxies incoming traffic on port `80` (HTTP). It feeds logs back to the Controller and dynamically hot-reloads configurations.
+3. **Tidak Ada Sinkronisasi Real-Time Config (Gossip Protocol)**:
+   Ketika rule atau blocklist diubah via UI, controller saat ini menyebar IP Blocklist, namun belum mendukung penyebaran Custom Rules atau sertifikat SSL secara dinamis tanpa *restart* Agent.
 
 ---
 
-## 💻 Platform Support & Feature Matrix
+## Kesimpulan
 
-The following matrix shows the feature availability and differences across target Operating Systems:
+Aegis WAF adalah landasan / prototipe yang **sangat bagus** secara arsitektur dasar. Performa Rust Proxy ditambah skalabilitas basis data ClickHouse dan reaktivitas Svelte UI menyajikan _User Experience_ yang luar biasa cepat. 
 
-| Feature | Linux | Windows | macOS |
-| :--- | :---: | :---: | :---: |
-| **Layer 7 HTTP Proxy & WAF** | ✅ Supported | ✅ Supported | ✅ Supported |
-| **Dynamic Virtual Host Routing** | ✅ Supported | ✅ Supported | ✅ Supported |
-| **Stateless Rate Limiting Tiers** | ✅ Supported | ✅ Supported | ✅ Supported |
-| **Geoblocking (Allow/Blocklist)** | ✅ Supported | ✅ Supported | ✅ Supported |
-| **Collaborative IP Threat Intel** | ✅ Supported | ✅ Supported | ✅ Supported |
-| **Privilege Dropping (Root -> Nobody)** | ✅ Yes (`nix` UID/GID drop) | ❌ N/A (Runs as Admin) | ❌ N/A (Runs as Root/Sudo) |
-| **eBPF XDP Packet Offloading** | ✅ Supported (Kernel space) | ❌ Not Supported | ❌ Not Supported |
-| **eBPF Uprobe SSL Sniffing** | ✅ Supported (Zero-copy L7) | ❌ Not Supported | ❌ Not Supported |
-| **Native System Daemon Integration** | ✅ Yes (`systemd` Service) | ❌ No (Task Scheduler/NSSM) | ❌ No (`launchd` Plist) |
+**Next Steps yang dibutuhkan (Roadmap):**
+- **eBPF Integration**: Menanamkan probe eBPF (XDP) untuk mem- *drop* koneksi pada level kernel sehingga konsumsi CPU server target mendekati 0% saat DDoS (Phase 5).
+- Mengganti simulasi *hardware metrics* dengan metrik sungguhan.
+- Membuat Endpoint API untuk mengatur *Rate Limiting Tiers* yang kompleks.
 
 ---
 
-## 🚀 Installation & Setup Guide
+## 🚀 Tata Cara Instalasi
 
-### Prerequisites
-1. **Rust Toolchain**: Install [Rust (cargo)](https://www.rust-lang.org/tools/install) (edition 2021).
-2. **Node.js**: Install [Node.js (npm)](https://nodejs.org/) (for dashboard compilation).
+Aegis WAF terbagi menjadi dua komponen utama: **Central Controller** (sebagai otak & penyimpan log) dan **Agent Node** (sebagai shield yang dipasang di server target).
 
-### Quick Build
-Compile both the frontend dashboard and the Rust WAF executable from the root directory:
+### 1. Menjalankan Central Controller & Dashboard (Windows / Linux / macOS)
+Sangat direkomendasikan menjalankan Controller menggunakan **Docker Desktop** (Windows/Mac) atau **Docker Engine** (Linux) karena sudah me-*bundling* ClickHouse Database.
+
 ```bash
-# Install dashboard frontend dependencies
-npm run dashboard:install
+# 1. Masuk ke direktori aegis-waf
+cd aegis-waf
 
-# Compile the entire project (Dashboard + Rust executable)
-npm run build-all
+# 2. Nyalakan Controller, Dashboard UI, dan ClickHouse dalam 1x perintah
+docker-compose up -d --build
+```
+*Akses Dashboard WAF di Browser: `http://localhost:8080`*
+
+### 2. Memasang Agent Node di Target Server (Linux / macOS)
+Gunakan *install script* yang di-_host_ oleh Controller Anda untuk mengonfigurasi Agent target:
+
+```bash
+# Ganti <CONTROLLER_IP> dengan IP Private/Public dari mesin Central Controller Anda
+curl -sSL http://<CONTROLLER_IP>:8080/install.sh | CONTROLLER_IP=<CONTROLLER_IP>:8080 bash
 ```
 
----
-
-## 💻 Operating System Guides
-
-### 1. Windows (PowerShell / CMD)
-Windows is supported for local development and homelab setups.
-
-*   **Binding Privileged Ports**: Running the WAF Agent on port `80` requires Administrator privileges on Windows. Open PowerShell/CMD as **Administrator**.
-*   **Compile & Build**:
-    ```cmd
-    npm run build-all
-    ```
-*   **Run Controller (Svelte + Logger)**:
-    ```cmd
-    npm run waf:controller
-    ```
-*   **Run WAF Agent**:
-    ```cmd
-    npm run waf:agent
-    ```
-    *Note: If you get a file locking error compiling on Windows, kill any running `aegis-waf` processes first.*
+*(Catatan PoC: Pada tahap pengembangan saat ini, Anda mungkin perlu melakukan `cargo build --release` secara manual di VM target jika rilis _binary_ belum dipublikasikan).*
 
 ---
 
-### 2. Linux (Debian, Ubuntu, CentOS)
-Linux is the recommended production environment.
+## 💻 Perbedaan Fitur Berdasarkan Sistem Operasi
 
-*   **Compilation**:
-    ```bash
-    npm run build-all
-    ```
-*   **Privilege Dropping (Security)**:
-    Linux prevents non-root users from binding to ports `<1024` (like port `80`). Aegis WAF binds to port `80` as root and immediately drops privileges to the `nobody` group/user (`uid=65534, gid=65534`) for security.
-*   **Running using Systemd**:
-    To keep the processes running in the background, create systemd service files:
-    
-    `/etc/systemd/system/aegis-controller.service`:
-    ```ini
-    [Unit]
-    Description=Aegis WAF Controller
-    After=network.target
+Kemampuan Agent Aegis WAF bervariasi bergantung pada sistem operasi dari Server Target yang dilindungi:
 
-    [Service]
-    WorkingDirectory=/home/aegis/aegis-waf
-    ExecStart=/home/aegis/aegis-waf/target/release/aegis-waf controller --port 8080
-    Restart=always
-    User=aegis
+| Fitur / Kemampuan | 🐧 Linux (Ubuntu/Debian/dll) | 🍎 macOS | 🪟 Windows Server |
+| :--- | :--- | :--- | :--- |
+| **Reverse Proxy Engine** | ✅ Ya (Sangat Cepat via epoll) | ✅ Ya (via kqueue) | ✅ Ya (via IOCP) |
+| **Pattern Matching (SQLi/XSS)** | ✅ Ya | ✅ Ya | ✅ Ya |
+| **Background Service Daemon** | ✅ Ya (`systemd`) | ⚠️ Manual / `launchd` | ✅ Ya (`install.ps1` via NSSM/SC) |
+| **eBPF (Kernel Packet Drop)** | 🔥 **Ya** (Siap dikembangkan untuk XDP) | ❌ Tidak didukung Apple Kernel | ❌ Tidak didukung Windows Kernel |
+| **Hardware Metrics Collection** | ✅ Mendalam (via `/proc`) | ⚠️ Terbatas | ⚠️ Terbatas (WMI overhead) |
 
-    [Install]
-    WantedBy=multi-user.target
-    ```
-
-    `/etc/systemd/system/aegis-agent.service`:
-    ```ini
-    [Unit]
-    Description=Aegis WAF Agent
-    After=network.target
-
-    [Service]
-    WorkingDirectory=/home/aegis/aegis-waf
-    ExecStart=/home/aegis/aegis-waf/target/release/aegis-waf agent --controller http://localhost:8080
-    Restart=always
-    # Binds to port 80 as root, drops privilege itself
-    User=root
-    Group=root
-
-    [Install]
-    WantedBy=multi-user.target
-    ```
-    Enable and start services:
-    ```bash
-    sudo systemctl daemon-reload
-    sudo systemctl enable --now aegis-controller aegis-agent
-    ```
-
----
-
-### 3. macOS
-macOS is fully supported for testing and local proxy setups.
-
-*   **Mac compilation**:
-    ```bash
-    npm run build-all
-    ```
-*   **Running with Sudo**:
-    Similar to Linux, binding to port `80` requires root. Run the agent with `sudo`:
-    ```bash
-    # Run Controller
-    cargo run -- controller
-    
-    # Run Agent (in another terminal tab)
-    sudo cargo run -- agent --controller http://localhost:8080
-    ```
-
----
-
-## ⚙️ Configuration (`config.toml`)
-
-The configuration file is automatically watched and dynamically hot-reloaded by the agent:
-
-```toml
-[global]
-port_http = 80
-port_https = 443
-max_body_size = 10485760      # 10 MB for body inspection
-default_rate_limit = 600      # 600 req/min default per IP
-log_dir = "./logs"
-
-[tls]
-mode = "local_ca"
-cert_dir = "./certs"
-
-[[vhosts]]
-name = "aegis_demo"
-hosts = ["*.aegiswaf.demo"]
-backend = "127.0.0.1:8080"
-rules = ["SQLI-*", "XSS-*", "LFI-*", "RFI-*"]
-ssl = "Auto (Local CA)"
-max_body = "10MB"
-rate_limit = "600 req/min"
-logging = { enabled = true, db_path = "logs/aegis-waf.db" }
-```
-
----
-
-## 🔧 Troubleshooting
-
-1.  **Vite / Build failures**: Ensure you ran `npm run dashboard:install` from the root directory to populate node modules.
-2.  **Port 80/8080 already in use**:
-    *   On Windows, check IIS or Docker container bindings: `netstat -ano | findstr 80`
-    *   On Linux/Mac: `sudo lsof -i :80` or `sudo lsof -i :8080`
-3.  **Windows Compilation Lock**: If `cargo build` fails with `Access Denied`, make sure you have closed any active terminal instances running `npm run waf:controller` or `npm run waf:agent` (`Ctrl + C` to close).
+### Mengapa Linux Paling Superior untuk WAF?
+Linux sangat direkomendasikan sebagai mesin yang dipasangi **Aegis Agent** untuk di lingkungan produksi. Hal ini dikarenakan Linux mendukung **eBPF (Extended Berkeley Packet Filter)**. Dengan eBPF, Aegis dapat mendeteksi lalu lintas berbahaya (seperti serangan Volumetrik DDoS) dan **membuang (drop) paket tersebut langsung di level Kernel (NIC)** sebelum paket tersebut membebani memori, TCP Stack, atau CPU server web Anda. Hal ini membuat CPU server target tetap stabil mendekati 0% di tengah pusaran serangan.

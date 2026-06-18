@@ -37,36 +37,41 @@
       </div>
 
       <nav class="nav-links">
-        <div 
+        <button 
+          type="button"
           class="nav-item {activeTab === 'overview' ? 'active' : ''}" 
           on:click={() => activeTab = 'overview'}
         >
           <span>📊</span> Overview
-        </div>
-        <div 
+        </button>
+        <button 
+          type="button"
           class="nav-item {activeTab === 'logs' ? 'active' : ''}" 
           on:click={() => activeTab = 'logs'}
         >
           <span>🛡️</span> Attack Logs
-        </div>
-        <div 
+        </button>
+        <button 
+          type="button"
           class="nav-item {activeTab === 'vhosts' ? 'active' : ''}" 
           on:click={() => activeTab = 'vhosts'}
         >
           <span>🌐</span> Virtual Hosts
-        </div>
-        <div 
+        </button>
+        <button 
+          type="button"
           class="nav-item {activeTab === 'rules' ? 'active' : ''}" 
           on:click={() => activeTab = 'rules'}
         >
           <span>⚙️</span> Rule Engine
-        </div>
-        <div 
+        </button>
+        <button 
+          type="button"
           class="nav-item {activeTab === 'rate_limits' ? 'active' : ''}" 
           on:click={() => activeTab = 'rate_limits'}
         >
           <span>🚨</span> Rate Limit Tiers
-        </div>
+        </button>
       </nav>
     </div>
 

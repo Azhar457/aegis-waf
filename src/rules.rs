@@ -83,12 +83,16 @@ impl RuleEngine {
         method: &str,
         enabled_rules: &[String],
     ) -> Option<(String, String)> {
+        let norm_path = normalize_string(path);
+        let norm_query = normalize_string(query);
+        let norm_body = normalize_string(body);
+
         let req_info = RequestInfo {
             method,
-            path,
-            query,
+            path: &norm_path,
+            query: &norm_query,
             headers,
-            body,
+            body: &norm_body,
             ip,
         };
 
@@ -115,6 +119,31 @@ impl RuleEngine {
 
         None
     }
+}
+
+pub fn normalize_string(input: &str) -> String {
+    let mut normalized = input.to_string();
+    
+    // 1. URL Decode (Recursively up to 3 times for double encoding)
+    for _ in 0..3 {
+        if let Ok(decoded) = urlencoding::decode(&normalized) {
+            if decoded == normalized {
+                break;
+            }
+            normalized = decoded.into_owned();
+        } else {
+            break;
+        }
+    }
+    
+    // 2. Lowercase for uniform signature matching
+    normalized = normalized.to_lowercase();
+    
+    // 3. Strip Null Bytes & Collapse Whitespace
+    normalized = normalized.replace('\0', "");
+    normalized = normalized.split_whitespace().collect::<Vec<&str>>().join(" ");
+    
+    normalized
 }
 
 fn is_rule_enabled(rule_id: &str, enabled_rules: &[String]) -> bool {

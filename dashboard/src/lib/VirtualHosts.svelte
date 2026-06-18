@@ -348,7 +348,7 @@
 
           <!-- Batching Checkbox Selector for rules -->
           <div class="form-group font-span-2">
-            <label>Enable WAF Rule Modules (Batching Mode)</label>
+            <span class="form-section-label">Enable WAF Rule Modules (Batching Mode)</span>
             <div class="rules-checkbox-grid">
               <label class="checkbox-label-vhost">
                 <input type="checkbox" bind:checked={selectedCategories.sqli} />
@@ -388,7 +388,7 @@
 
           <!-- Geoblocking Checkboxes -->
           <div class="form-group font-span-2">
-            <label>Geoblocking Countries ({geoblockType === 'Allowlist' ? 'Allow List' : 'Block List'})</label>
+            <span class="form-section-label">Geoblocking Countries ({geoblockType === 'Allowlist' ? 'Allow List' : 'Block List'})</span>
             <div class="countries-checkbox-grid">
               {#each availableCountries as country}
                 <label class="checkbox-label-vhost">
@@ -396,7 +396,7 @@
                     type="checkbox"
                     value={country.code}
                     checked={blockedCountries.includes(country.code)}
-                    on:change={(e) => toggleCountry(country.code, e.target.checked)}
+                    on:change={(e) => toggleCountry(country.code, (e.target as HTMLInputElement).checked)}
                   />
                   <span>{country.flag} {country.name}</span>
                 </label>
@@ -662,6 +662,14 @@
     padding: 1rem;
     border-radius: 6px;
     margin-top: 0.25rem;
+  }
+
+  .form-section-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 500;
   }
 
   .checkbox-label-vhost {

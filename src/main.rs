@@ -96,16 +96,17 @@ async fn run_agent(config_path: &str, controller: Option<String>, token: Option<
     let config_arc = Arc::new(std::sync::RwLock::new(cfg.clone()));
 
     // Setup logging
-    logging::init_db(&cfg).expect("Failed to init logging DB");
+    let clickhouse_url = std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string());
+    logging::init_db(&clickhouse_url).await.expect("Failed to init ClickHouse DB");
 
     // Initialize MPSC Channel for logs
     let (log_tx, log_rx) = tokio::sync::mpsc::channel::<logging::WafLogEntry>(10000);
 
     // Spawn Background Log Worker
     let controller_url = controller.clone();
-    let cfg_clone = cfg.clone();
+    let ch_url_clone = clickhouse_url.clone();
     tokio::spawn(async move {
-        logging::log_worker(log_rx, cfg_clone, controller_url).await;
+        logging::log_worker(log_rx, ch_url_clone, controller_url).await;
     });
 
     // Spawn background config reloader
@@ -159,7 +160,6 @@ async fn run_agent(config_path: &str, controller: Option<String>, token: Option<
     // Spawn background threat intelligence / reputation blocklist sync task
     let blocklist_clone = blocklist.clone();
     let controller_url_clone = controller.clone();
-    let db_path_local = Path::new(&cfg.global.log_dir).join("aegis-waf.db");
     
     tokio::spawn(async move {
         let client = reqwest::Client::new();
@@ -189,42 +189,24 @@ async fn run_agent(config_path: &str, controller: Option<String>, token: Option<
                     }
                 }
             } else {
-                // Standalone Mode: Query local SQLite DB directly for IPs with >= 5 blocks in last 5 minutes
-                let db_path_clone = db_path_local.clone();
+                // Standalone Mode: Query ClickHouse
+                let clickhouse_url_local = std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string());
                 let blocklist_standalone = blocklist_clone.clone();
-                let res = tokio::task::spawn_blocking(move || {
-                    let conn = rusqlite::Connection::open(db_path_clone)?;
-                    let mut stmt = conn.prepare(
-                        "SELECT client_ip, COUNT(*) as count 
-                         FROM request_log 
-                         WHERE method = 'BLOCK' 
-                           AND datetime(timestamp) > datetime('now', '-5 minutes') 
-                         GROUP BY client_ip 
-                         HAVING count >= 5"
-                    )?;
-                    let ip_iter = stmt.query_map([], |row| {
-                        let ip_str: String = row.get(0)?;
-                        Ok(ip_str)
-                    })?;
-                    let mut ips = std::collections::HashSet::new();
-                    for ip in ip_iter {
-                        if let Ok(ip_str) = ip {
-                            if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+                let client_clone = client.clone();
+                
+                let query = "SELECT client_ip FROM request_log WHERE action = 'BLOCK' AND timestamp > now() - INTERVAL 5 MINUTE GROUP BY client_ip HAVING count() >= 5 FORMAT TSV";
+                let url = format!("{}/?query={}", clickhouse_url_local.trim_end_matches('/'), urlencoding::encode(query));
+                if let Ok(resp) = client_clone.get(&url).send().await {
+                    if let Ok(text) = resp.text().await {
+                        let mut ips = std::collections::HashSet::new();
+                        for line in text.lines() {
+                            if let Ok(ip) = line.trim().parse::<std::net::IpAddr>() {
                                 ips.insert(ip);
                             }
                         }
-                    }
-                    Ok::<std::collections::HashSet<std::net::IpAddr>, rusqlite::Error>(ips)
-                }).await;
-
-                match res {
-                    Ok(Ok(ips)) => {
                         if let Ok(mut lock) = blocklist_standalone.write() {
                             *lock = ips;
                         }
-                    }
-                    _ => {
-                        tracing::error!("Failed to query local DB for reputation blocklist");
                     }
                 }
             }
@@ -260,7 +242,7 @@ async fn run_agent(config_path: &str, controller: Option<String>, token: Option<
 #[derive(Clone)]
 struct ControllerState {
     tx: broadcast::Sender<logging::WafLogEntry>,
-    db_path: String,
+    clickhouse_url: String,
     logging_enabled: Arc<AtomicBool>,
     log_size_limit_mb: Arc<AtomicU64>,
     config_path: String,
@@ -269,43 +251,16 @@ struct ControllerState {
 async fn run_controller(port: u16, config_path: String) {
     info!("Starting Aegis WAF Controller on port {}...", port);
 
-    // Ensure logs folder exists
-    let log_dir = Path::new("./logs");
-    fs::create_dir_all(log_dir).ok();
-    let db_path = "./logs/aegis-controller.db";
+    let clickhouse_url = std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string());
+    logging::init_db(&clickhouse_url).await.expect("Failed to initialize ClickHouse DB");
 
-    // Initialize database
-    let conn = rusqlite::Connection::open(db_path).expect("Failed to open controller DB");
-    conn.execute_batch(
-        "PRAGMA journal_mode=WAL;
-         PRAGMA synchronous=NORMAL;"
-    ).expect("Failed to enable WAL mode");
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS request_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            client_ip TEXT NOT NULL,
-            method TEXT,
-            path TEXT,
-            status INTEGER,
-            rule_id TEXT,
-            reason TEXT
-        )",
-        [],
-    ).expect("Failed to init controller DB table");
-
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_request_log_reputation ON request_log (timestamp, method, client_ip)",
-        [],
-    ).expect("Failed to create index for reputation lookup");
-
-    // Initialize Broadcast Channel
-    let (tx, _rx) = broadcast::channel::<logging::WafLogEntry>(4096);
+    // Initialize broadcast channel for live logs
+    let (tx, _rx) = broadcast::channel(10000);
 
     // App state
     let state = ControllerState {
         tx,
-        db_path: db_path.to_string(),
+        clickhouse_url: clickhouse_url.clone(),
         logging_enabled: Arc::new(AtomicBool::new(true)),
         log_size_limit_mb: Arc::new(AtomicU64::new(500)), // default 500MB
         config_path,
@@ -459,10 +414,7 @@ async fn post_vhosts_handler(
 }
 
 async fn get_db_size_handler(State(state): State<ControllerState>) -> impl IntoResponse {
-    let size_bytes = match std::fs::metadata(&state.db_path) {
-        Ok(m) => m.len(),
-        Err(_) => 0,
-    };
+    let size_bytes = logging::get_db_size(&state.clickhouse_url).await.unwrap_or(0);
     
     let formatted = if size_bytes < 1024 {
         format!("{} B", size_bytes)
@@ -476,52 +428,22 @@ async fn get_db_size_handler(State(state): State<ControllerState>) -> impl IntoR
 }
 
 async fn export_logs_handler(State(state): State<ControllerState>) -> impl IntoResponse {
-    let db_path = state.db_path.clone();
-    let res = tokio::task::spawn_blocking(move || {
-        let conn = rusqlite::Connection::open(db_path)?;
-        let mut stmt = conn.prepare(
-            "SELECT timestamp, client_ip, method, path, rule_id, reason 
-             FROM request_log 
-             ORDER BY id DESC LIMIT 5000"
-        )?;
-        let logs_iter = stmt.query_map([], |row| {
-            let timestamp: String = row.get(0)?;
-            let client_ip: String = row.get(1)?;
-            let action: String = row.get(2)?; // method column stores action (BLOCK / RATE_LIMIT)
-            let path: String = row.get(3)?;
-            let rule_id: String = row.get(4)?;
-            let reason: String = row.get(5)?;
-            
-            // Format exactly like standard raw tail logs
-            Ok(format!(
-                "[{}] | {} | {} | {} | {} | {}\n", 
-                timestamp, client_ip, action, path, rule_id, reason
-            ))
-        })?;
-
-        let mut lines = String::new();
-        for line in logs_iter {
-            if let Ok(l) = line {
-                lines.push_str(&l);
+    let client = reqwest::Client::new();
+    let query = "SELECT * FROM request_log FORMAT TSV";
+    let url = format!("{}/?query={}", state.clickhouse_url.trim_end_matches('/'), urlencoding::encode(query));
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(content) = resp.text().await {
+                Response::builder()
+                    .header("Content-Type", "text/plain; charset=utf-8")
+                    .header("Content-Disposition", "attachment; filename=\"aegis-access.log\"")
+                    .body(Body::from(content))
+                    .unwrap()
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read body").into_response()
             }
         }
-        Ok::<String, rusqlite::Error>(lines)
-    }).await;
-
-    match res {
-        Ok(Ok(content)) => {
-            Response::builder()
-                .header("Content-Type", "text/plain; charset=utf-8")
-                .header("Content-Disposition", "attachment; filename=\"aegis-access.log\"")
-                .body(Body::from(content))
-                .unwrap()
-        }
-        _ => {
-            Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from("Failed to export logs"))
-                .unwrap()
-        }
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "Failed to export logs from ClickHouse").into_response(),
     }
 }
 
@@ -534,58 +456,17 @@ async fn receive_logs_handler(
         return StatusCode::OK;
     }
 
-    let db_path_clone = state.db_path.clone();
+    let client = reqwest::Client::new();
+    let mut body = String::new();
     let logs_clone = logs.clone();
-
-    // Bulk insert into SQLite database using spawn_blocking
-    let res = tokio::task::spawn_blocking(move || {
-        let mut conn = rusqlite::Connection::open(db_path_clone)?;
-        let tx = conn.transaction()?;
-        {
-            let mut stmt = tx.prepare(
-                "INSERT INTO request_log (timestamp, client_ip, method, path, status, rule_id, reason)
-                 VALUES (?1, ?2, ?3, ?4, 403, ?5, ?6)"
-            )?;
-            for log in logs_clone {
-                stmt.execute(rusqlite::params![
-                    log.timestamp,
-                    log.client_ip,
-                    log.action, // method stores WAF action (BLOCK / RATE_LIMIT)
-                    log.path,
-                    log.rule_id,
-                    log.reason
-                ])?;
-            }
-        }
-        tx.commit()?;
-        Ok::<(), rusqlite::Error>(())
-    }).await;
-
-    if let Err(e) = res {
-        tracing::error!("Controller DB bulk insert join error: {:?}", e);
-    } else if let Ok(Err(db_err)) = res {
-        tracing::error!("Controller DB bulk insert SQLite error: {:?}", db_err);
-    }
-
-    // Auto-pruning logic: check file size on disk
-    let limit_mb = state.log_size_limit_mb.load(Ordering::Relaxed);
-    if limit_mb > 0 {
-        let limit_bytes = limit_mb * 1024 * 1024;
-        if let Ok(metadata) = std::fs::metadata(&state.db_path) {
-            if metadata.len() > limit_bytes {
-                let db_path_clone2 = state.db_path.clone();
-                tokio::task::spawn_blocking(move || {
-                    if let Ok(conn) = rusqlite::Connection::open(db_path_clone2) {
-                        // Delete oldest 1000 rows
-                        let _ = conn.execute(
-                            "DELETE FROM request_log WHERE id IN (SELECT id FROM request_log ORDER BY id ASC LIMIT 1000)",
-                            []
-                        );
-                    }
-                });
-            }
+    for entry in &logs_clone {
+        if let Ok(json) = serde_json::to_string(entry) {
+            body.push_str(&json);
+            body.push('\n');
         }
     }
+    let url = format!("{}/?query=INSERT INTO request_log FORMAT JSONEachRow", state.clickhouse_url.trim_end_matches('/'));
+    let _ = client.post(&url).body(body).send().await;
 
     // Broadcast logs to connected dashboards
     for log in logs {
@@ -615,75 +496,48 @@ async fn sse_handler(
 async fn get_blocklist_handler(
     State(state): State<ControllerState>,
 ) -> impl IntoResponse {
-    let db_path = state.db_path.clone();
-    let res = tokio::task::spawn_blocking(move || {
-        let conn = rusqlite::Connection::open(db_path)?;
-        let mut stmt = conn.prepare(
-            "SELECT client_ip, COUNT(*) as count 
-             FROM request_log 
-             WHERE method = 'BLOCK' 
-               AND datetime(timestamp) > datetime('now', '-5 minutes') 
-             GROUP BY client_ip 
-             HAVING count >= 5"
-        )?;
-        let ip_iter = stmt.query_map([], |row| {
-            let ip_str: String = row.get(0)?;
-            Ok(ip_str)
-        })?;
-
-        let mut ips = Vec::new();
-        for ip in ip_iter {
-            ips.push(ip?);
+    let client = reqwest::Client::new();
+    let query = "SELECT client_ip FROM request_log WHERE action = 'BLOCK' AND timestamp > now() - INTERVAL 5 MINUTE GROUP BY client_ip HAVING count() >= 5 FORMAT TSV";
+    let url = format!("{}/?query={}", state.clickhouse_url.trim_end_matches('/'), urlencoding::encode(query));
+    if let Ok(resp) = client.get(&url).send().await {
+        if let Ok(text) = resp.text().await {
+            let mut ips = Vec::new();
+            for line in text.lines() {
+                let ip = line.trim().to_string();
+                if !ip.is_empty() {
+                    ips.push(ip);
+                }
+            }
+            return (StatusCode::OK, Json(ips)).into_response();
         }
-        Ok::<Vec<String>, rusqlite::Error>(ips)
-    }).await;
-
-    match res {
-        Ok(Ok(ips)) => (StatusCode::OK, Json(ips)).into_response(),
-        _ => (StatusCode::INTERNAL_SERVER_ERROR, "Failed to query blocklist").into_response(),
     }
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(Vec::<String>::new())).into_response()
 }
 
 async fn get_logs_handler(
     State(state): State<ControllerState>,
 ) -> impl IntoResponse {
-    let db_path = state.db_path.clone();
-    let res = tokio::task::spawn_blocking(move || {
-        let conn = rusqlite::Connection::open(db_path)?;
-        let mut stmt = conn.prepare(
-            "SELECT timestamp, client_ip, method, path, rule_id, reason 
-             FROM request_log 
-             ORDER BY id DESC LIMIT 100"
-        )?;
-        let logs_iter = stmt.query_map([], |row| {
-            Ok(logging::WafLogEntry {
-                timestamp: row.get(0)?,
-                client_ip: row.get(1)?,
-                method: "".to_string(),
-                path: row.get(3)?,
-                action: row.get(2)?, // method column stores action (BLOCK / RATE_LIMIT)
-                rule_id: row.get(4)?,
-                reason: row.get(5)?,
-            })
-        })?;
-
-        let mut logs = Vec::new();
-        for log in logs_iter {
-            logs.push(log?);
+    let client = reqwest::Client::new();
+    let query = "SELECT timestamp, client_ip, method, path, action, rule_id, reason FROM request_log ORDER BY timestamp DESC LIMIT 100 FORMAT JSONEachRow";
+    let url = format!("{}/?query={}", state.clickhouse_url.trim_end_matches('/'), urlencoding::encode(query));
+    if let Ok(resp) = client.get(&url).send().await {
+        if let Ok(text) = resp.text().await {
+            let mut logs = Vec::new();
+            for line in text.lines() {
+                if let Ok(log) = serde_json::from_str::<logging::WafLogEntry>(line) {
+                    logs.push(log);
+                }
+            }
+            return (StatusCode::OK, Json(logs)).into_response();
         }
-        Ok::<Vec<logging::WafLogEntry>, rusqlite::Error>(logs)
-    }).await;
-
-    match res {
-        Ok(Ok(logs)) => (StatusCode::OK, Json(logs)).into_response(),
-        _ => (StatusCode::INTERNAL_SERVER_ERROR, "Failed to query database").into_response(),
     }
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(Vec::<logging::WafLogEntry>::new())).into_response()
 }
 
 async fn get_stats_handler(
     State(state): State<ControllerState>,
 ) -> impl IntoResponse {
-    match logging::get_stats(&state.db_path, 24) {
+    match logging::get_stats(&state.clickhouse_url, 24).await {
         Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)).into_response()
     }
@@ -703,7 +557,7 @@ async fn ws_agent_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
 async fn handle_dashboard_socket(mut socket: WebSocket, state: ControllerState) {
     info!("Dashboard client connected via WebSocket");
     let mut rx = state.tx.subscribe();
-    let db_path = state.db_path.clone();
+    let clickhouse_url = state.clickhouse_url.clone();
     let mut stats_interval = tokio::time::interval(std::time::Duration::from_secs(5));
 
     loop {
@@ -724,7 +578,7 @@ async fn handle_dashboard_socket(mut socket: WebSocket, state: ControllerState) 
                 }
             }
             _ = stats_interval.tick() => {
-                if let Ok(stats) = logging::get_stats(&db_path, 24) {
+                if let Ok(stats) = logging::get_stats(&clickhouse_url, 24).await {
                     let json = serde_json::json!({
                         "type": "stats",
                         "total_requests": stats.total_requests,

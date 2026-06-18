@@ -24,8 +24,8 @@ export const stats = writable<Stats>({ total_requests: 0, blocked: 0, rate_limit
 export const dbSize = writable<string>('0.0 KB');
 export const vhostsCount = writable<number>(0);
 
-let eventSource: EventSource | null = null;
-let statsInterval: ReturnType<typeof setInterval>;
+let ws: WebSocket | null = null;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let flushInterval: ReturnType<typeof setInterval>;
 let incomingQueue: WafLog[] = [];
 let isInitialized = false;
@@ -34,42 +34,50 @@ export function initGlobalStore(controllerUrl: string) {
   if (isInitialized) return;
   isInitialized = true;
 
-  const fetchStats = async () => {
-    try {
-      const res = await fetch(`${controllerUrl}/api/v1/stats`);
-      if (res.ok) {
-        const data = await res.json();
-        stats.set(data);
+  const connectWs = () => {
+    const wsUrl = controllerUrl.replace(/^http/, 'ws') + '/ws/dashboard';
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      connectionStatus.set('online');
+    };
+
+    ws.onclose = () => {
+      connectionStatus.set('offline');
+      ws = null;
+      if (!reconnectTimer) {
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          connectWs();
+        }, 2000);
       }
-    } catch (e) {
-      // connecting or offline
-    }
-  };
-  
-  fetchStats();
-  statsInterval = setInterval(fetchStats, 5000);
+    };
 
-  const sseUrl = `${controllerUrl}/api/v1/logs/stream`;
-  eventSource = new EventSource(sseUrl);
+    ws.onerror = () => {
+      ws?.close();
+    };
 
-  eventSource.onopen = () => {
-    connectionStatus.set('online');
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'log') {
+          data.expanded = false;
+          incomingQueue.push(data);
+          latestLog.set(data);
+        } else if (data.type === 'stats') {
+          stats.set({
+            total_requests: data.total_requests,
+            blocked: data.blocked,
+            rate_limited: data.rate_limited
+          });
+        }
+      } catch (e) {
+        // Ignore parsing errors
+      }
+    };
   };
 
-  eventSource.onerror = () => {
-    connectionStatus.set('offline');
-  };
-
-  eventSource.onmessage = (event) => {
-    try {
-      const log: WafLog = JSON.parse(event.data);
-      log.expanded = false;
-      incomingQueue.push(log);
-      latestLog.set(log); // publish to single log subscribers
-    } catch (e) {
-      // Ignored
-    }
-  };
+  connectWs();
 
   flushInterval = setInterval(() => {
     if (incomingQueue.length > 0) {
@@ -83,11 +91,14 @@ export function initGlobalStore(controllerUrl: string) {
 }
 
 export function cleanupGlobalStore() {
-  if (eventSource) {
-    eventSource.close();
-    eventSource = null;
+  if (ws) {
+    ws.close();
+    ws = null;
   }
-  if (statsInterval) clearInterval(statsInterval);
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   if (flushInterval) clearInterval(flushInterval);
   isInitialized = false;
 }

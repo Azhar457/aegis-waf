@@ -3,9 +3,11 @@
   import { Terminal } from '@xterm/xterm';
   import { FitAddon } from '@xterm/addon-fit';
   import { SearchAddon } from '@xterm/addon-search';
+  import { WebglAddon } from '@xterm/addon-webgl';
   import '@xterm/xterm/css/xterm.css';
   import { connectionStatus, stats, latestLog, dbSize } from './stores';
   import type { WafLog } from './stores';
+  import Chart from 'chart.js/auto';
 
   export let controllerUrl = '';
 
@@ -32,6 +34,9 @@
   let fitAddon: FitAddon | null = null;
   let searchAddon: SearchAddon | null = null;
   let isScrollLocked = true;
+
+  let chartCanvas: HTMLCanvasElement;
+  let threatChart: Chart | null = null;
 
   const countries = [
     { code: 'US', name: 'United States', x: 100, y: 45 },
@@ -252,7 +257,55 @@
         attackTrend = [...attackTrend.slice(1), 0];
       }
       lastTotalBlocked = currentTotalBlocked;
+
+      if (threatChart) {
+        threatChart.data.datasets[0].data = [...attackTrend];
+        const maxVal = Math.max(...attackTrend, 10);
+        if (threatChart.options.scales && threatChart.options.scales.y) {
+          (threatChart.options.scales.y as any).suggestedMax = maxVal;
+        }
+        threatChart.update('none');
+      }
     }, 5000);
+
+    // Initialize Chart.js
+    if (chartCanvas) {
+      const ctx = chartCanvas.getContext('2d');
+      const gradient = ctx?.createLinearGradient(0, 0, 0, 120);
+      gradient?.addColorStop(0, 'rgba(244, 63, 94, 0.3)');
+      gradient?.addColorStop(1, 'rgba(244, 63, 94, 0)');
+
+      threatChart = new Chart(chartCanvas, {
+        type: 'line',
+        data: {
+          labels: Array(15).fill(''),
+          datasets: [{
+            label: 'Blocked Requests',
+            data: [...attackTrend],
+            borderColor: '#f43f5e',
+            backgroundColor: gradient,
+            borderWidth: 2.5,
+            fill: true,
+            tension: 0.4,
+            pointRadius: 0,
+            pointHoverRadius: 4
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: { duration: 0 },
+          scales: {
+            x: { display: false },
+            y: { display: false, min: 0, suggestedMax: 10 }
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: { enabled: false }
+          }
+        }
+      });
+    }
 
     // Initialize xterm.js
     term = new Terminal({
@@ -284,6 +337,12 @@
     term.loadAddon(searchAddon);
 
     term.open(terminalDiv);
+    try {
+      const webglAddon = new WebglAddon();
+      term.loadAddon(webglAddon);
+    } catch (e) {
+      console.warn('WebGL addon failed to load', e);
+    }
     printWelcomeBanner();
 
     // M4 Fix: handle browser resize properly
@@ -332,6 +391,7 @@
     if (trendInterval) clearInterval(trendInterval);
     if (resizeObserver) resizeObserver.disconnect();
     if (term) term.dispose();
+    if (threatChart) threatChart.destroy();
   });
 
   function handleExport() {
@@ -346,15 +406,7 @@
     incomingTerminalQueue = [];
   }
 
-  // SVG Chart path calculation with Auto-Scaling
-  $: chartWidth = 500;
-  $: chartHeight = 120;
   $: maxTrendVal = Math.max(...attackTrend, 10);
-  $: chartPoints = attackTrend.map((val, i) => {
-    const x = (i / (attackTrend.length - 1)) * chartWidth;
-    const y = chartHeight - (val / maxTrendVal) * (chartHeight - 10);
-    return `${x},${y}`;
-  }).join(' ');
 
   function formatCount(num: number): string {
     if (num < 1000) return num.toString();
@@ -411,34 +463,7 @@
         <span class="badge scale-badge">Max: {maxTrendVal} req/3s</span>
       </div>
       <div class="chart-container">
-        <svg viewBox="0 0 500 120" preserveAspectRatio="none" class="chart-svg">
-          <defs>
-            <linearGradient id="chartGrad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stop-color="var(--color-critical)" stop-opacity="0.3"/>
-              <stop offset="100%" stop-color="var(--color-critical)" stop-opacity="0"/>
-            </linearGradient>
-          </defs>
-
-          <!-- Grid Lines -->
-          <line x1="0" y1="30" x2="500" y2="30" stroke="rgba(255,255,255,0.03)" stroke-width="1" />
-          <line x1="0" y1="60" x2="500" y2="60" stroke="rgba(255,255,255,0.03)" stroke-width="1" />
-          <line x1="0" y1="90" x2="500" y2="90" stroke="rgba(255,255,255,0.03)" stroke-width="1" />
-
-          <!-- Filled path -->
-          <path 
-            d="M0,{chartHeight} L{chartPoints} L{chartWidth},{chartHeight} Z" 
-            fill="url(#chartGrad)" 
-          />
-
-          <!-- Trend line -->
-          <polyline 
-            fill="none" 
-            stroke="var(--color-critical)" 
-            stroke-width="2.5" 
-            points={chartPoints}
-            class="glow-critical"
-          />
-        </svg>
+        <canvas bind:this={chartCanvas} class="chart-canvas"></canvas>
       </div>
       <div class="chart-labels">
         <span>45s ago</span>
@@ -657,12 +682,6 @@
     height: 120px;
     position: relative;
     margin-bottom: 0.5rem;
-  }
-
-  .chart-svg {
-    width: 100%;
-    height: 100%;
-    overflow: visible;
   }
 
   .chart-labels {
