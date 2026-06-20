@@ -17,7 +17,7 @@ pub async fn forward_request(
     req: Request<Body>,
 ) -> Response<Body> {
     // Read config inside a block to ensure RwLockReadGuard does not cross await boundaries
-    let (backend_addr, vhost_cfg, global_max_body_size, global_default_rate_limit, log_level) = {
+    let (backend_addr, vhost_cfg, global_max_body_size, global_default_rate_limit, log_level, trusted_proxies) = {
         let config_lock = state.config.read().unwrap();
         let (b, v) = vhost::match_vhost(host.as_ref(), &*config_lock);
         (
@@ -26,20 +26,49 @@ pub async fn forward_request(
             config_lock.global.max_body_size,
             config_lock.global.default_rate_limit,
             config_lock.global.log_level.to_lowercase(),
+            config_lock.global.trusted_proxies.clone(),
         )
     };
 
-    // Extract real client IP (XFF only trusted from internal/private proxies)
+    // Extract real client IP (XFF only trusted from whitelisted/private proxies)
     let client_ip = {
         let peer_ip = peer_addr.ip();
-        let is_trusted = crate::is_local_ip(&peer_ip);
+        let is_trusted = if let Some(ref proxies) = trusted_proxies {
+            proxies.iter().any(|p_str| {
+                p_str.parse::<std::net::IpAddr>().map(|ip| ip == peer_ip).unwrap_or(false)
+            })
+        } else {
+            crate::is_local_ip(&peer_ip)
+        };
+
         if is_trusted {
-            req.headers()
+            if let Some(xff) = req.headers()
                 .get("x-forwarded-for")
                 .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.split(',').last()) // Ambil IP paling kanan (proxied terakhir)
-                .and_then(|ip| ip.trim().parse().ok())
-                .unwrap_or(peer_ip)
+            {
+                // Traverse right-to-left
+                let parts: Vec<&str> = xff.split(',').map(|s| s.trim()).collect();
+                let mut resolved = peer_ip;
+                for part in parts.iter().rev() {
+                    if let Ok(parsed_ip) = part.parse::<std::net::IpAddr>() {
+                        let is_part_trusted = if let Some(ref proxies) = trusted_proxies {
+                            proxies.iter().any(|p_str| {
+                                p_str.parse::<std::net::IpAddr>().map(|ip| ip == parsed_ip).unwrap_or(false)
+                            })
+                        } else {
+                            crate::is_local_ip(&parsed_ip)
+                        };
+                        if !is_part_trusted {
+                            resolved = parsed_ip;
+                            break;
+                        }
+                        resolved = parsed_ip;
+                    }
+                }
+                resolved
+            } else {
+                peer_ip
+            }
         } else {
             peer_ip
         }
@@ -108,6 +137,17 @@ pub async fn forward_request(
         if parsed > 0 { parsed } else { global_max_body_size }
     };
 
+    // Check Content-Length header upfront to prevent oversized bodies from being processed or forwarded
+    if let Some(cl_header) = req.headers().get(axum::http::header::CONTENT_LENGTH) {
+        if let Ok(cl_str) = cl_header.to_str() {
+            if let Ok(cl_val) = cl_str.parse::<usize>() {
+                if cl_val > max_body_size {
+                    return (StatusCode::PAYLOAD_TOO_LARGE, "Request payload exceeds configured limit").into_response();
+                }
+            }
+        }
+    }
+
     let body_inspection = vhost_cfg
         .rate_limit_tiers
         .iter()
@@ -116,9 +156,16 @@ pub async fn forward_request(
         .unwrap_or(true);
 
     let (body_str, new_body) = if body_inspection {
-        let bytes = axum::body::to_bytes(req.into_body(), max_body_size).await.unwrap_or_default();
-        let text = String::from_utf8_lossy(&bytes).to_string();
-        (text, Body::from(bytes))
+        match axum::body::to_bytes(req.into_body(), max_body_size).await {
+            Ok(bytes) => {
+                let text = String::from_utf8_lossy(&bytes).to_string();
+                (text, Body::from(bytes))
+            }
+            Err(_) => {
+                // If it fails (due to exceeding limit or connection issues), reject the request
+                return (StatusCode::PAYLOAD_TOO_LARGE, "Payload too large or read error").into_response();
+            }
+        }
     } else {
         // Jangan inspeksi, langsung forward
         (String::new(), req.into_body())
