@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { stats, dbSize } from './stores';
+  import { stats, dbSize, logs } from './stores';
 
   export let controllerUrl = '';
 
@@ -79,12 +79,30 @@
     }
   }
 
+  function formatCount(num: number): string {
+    if (num < 1000) return num.toString();
+    if (num < 1000000) {
+      return (num / 1000).toFixed(1).replace('.0', '') + 'k';
+    }
+    return (num / 1000000).toFixed(1).replace('.0', '') + 'M';
+  }
+
+  function formatTime(timestamp: string): string {
+    try {
+      if (timestamp.includes('T')) {
+        return timestamp.split('T')[1].split('.')[0];
+      }
+      return timestamp;
+    } catch {
+      return timestamp;
+    }
+  }
+
   onMount(() => {
     fetchSystemSummary();
     summaryInterval = setInterval(fetchSystemSummary, 5000);
     
     updateInterval = setInterval(() => {
-      // Calculate reqsPerSec from global stats
       const currentTotal = $stats.total_requests;
       if (lastTotalRequests > 0) {
         reqsPerSec = Math.max(0, Math.floor((currentTotal - lastTotalRequests) / 2.5));
@@ -99,743 +117,268 @@
   });
 </script>
 
-<div class="overview-panel animate-fade-in">
-  <!-- Status Banner -->
-  <div class="card status-banner-card bg-pass-glow">
-    <div class="banner-left">
-      <span class="status-badge-pulse">SECURE</span>
-      <div class="banner-text">
-        <h4>Aegis Firewall Core Operational</h4>
-        <p class="text-muted">All virtual host routing networks are active. Traffic inspected in real time.</p>
+<div class="overview-panel flex flex-col gap-lg">
+  <!-- Header Section -->
+  <div class="flex justify-between items-end">
+    <div>
+      <div class="flex items-center gap-2 text-on-surface-variant text-xs mb-1">
+        <span>Aegis WAF</span>
+        <span class="material-symbols-outlined text-[12px]">chevron_right</span>
+        <span class="text-primary">Dashboard</span>
       </div>
+      <h2 class="font-headline-md text-headline-md font-bold text-on-surface">Network Overview</h2>
+      <p class="text-on-surface-variant font-body-sm text-body-sm">Real-time traffic telemetry and threat mitigation status.</p>
     </div>
-    <div class="banner-right">
-      <div class="metric-group">
-        <span class="m-val">{reqsPerSec}</span>
-        <span class="m-lbl">REQ/SEC</span>
+    <div class="flex gap-sm">
+      <div class="flex flex-col items-end">
+        <span class="text-[10px] text-on-surface-variant uppercase font-bold">Sampling Rate</span>
+        <span class="font-code-md text-code-md text-primary">1:1 (Real-time)</span>
       </div>
     </div>
   </div>
 
-  <!-- Agent Health Status cards -->
-  <h3 class="section-title">WAF Node Agent Diagnostics</h3>
-  {#if agents.length === 0}
-    <div class="card no-agents-card">
-      <div class="no-agents-content">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-warning">
-          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
-          <line x1="12" y1="9" x2="12" y2="13"></line>
-          <line x1="12" y1="17" x2="12.01" y2="17"></line>
-        </svg>
-        <h4>No WAF Node Agents Connected</h4>
-        <p>Aegis WAF requires at least one Agent Node to inspect traffic. Install and connect an agent using this command on your target server:</p>
-        <div class="code-install-box font-mono">
-          <code>curl -sSL http://{window.location.hostname}:8080/install.sh | CONTROLLER_IP={window.location.hostname}:8080 bash</code>
-        </div>
+  <!-- Metric Grid -->
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-lg">
+    <!-- Total Requests -->
+    <div class="glass-panel p-lg rounded-lg cyan-glow">
+      <div class="flex justify-between items-start mb-sm">
+        <span class="text-on-surface-variant text-[12px] font-bold uppercase tracking-widest">Total Requests</span>
+        <span class="material-symbols-outlined text-primary">dynamic_feed</span>
+      </div>
+      <div class="flex items-baseline gap-sm">
+        <h3 class="font-metric-lg text-metric-lg text-primary">{formatCount($stats.total_requests)}</h3>
+        <span class="text-primary/60 text-[11px] font-code-md font-mono">({reqsPerSec} req/sec)</span>
+      </div>
+      <div class="mt-md h-1 bg-surface-container rounded-full overflow-hidden">
+        <div class="h-full bg-primary w-full"></div>
       </div>
     </div>
-  {:else}
-    <div class="grid-cols-2">
-      {#each agents as agent}
-        <div class="card agent-diagnostic-card">
-          <div class="agent-hdr">
-            <div class="agent-title-info">
-              <span class="dot {agent.status === 'online' ? 'online' : 'offline'}"></span>
-              <strong>{agent.hostname}</strong>
-              <span class="agent-ip-sub font-mono">({agent.ip})</span>
+
+    <!-- Threats Blocked -->
+    <div class="glass-panel p-lg rounded-lg">
+      <div class="flex justify-between items-start mb-sm">
+        <span class="text-on-surface-variant text-[12px] font-bold uppercase tracking-widest">Threats Blocked</span>
+        <span class="material-symbols-outlined text-secondary">gpp_maybe</span>
+      </div>
+      <div class="flex items-baseline gap-sm">
+        <h3 class="font-metric-lg text-metric-lg text-secondary">{formatCount($stats.blocked)}</h3>
+        {#if $stats.total_requests > 0}
+          <span class="text-secondary/60 text-body-sm font-code-md font-mono">({(($stats.blocked / $stats.total_requests) * 100).toFixed(2)}%)</span>
+        {/if}
+      </div>
+      <div class="mt-md h-1 bg-surface-container rounded-full overflow-hidden">
+        <div class="h-full bg-secondary" style="width: {$stats.total_requests > 0 ? ($stats.blocked / $stats.total_requests) * 100 : 0}%"></div>
+      </div>
+    </div>
+
+    <!-- Rate Limited -->
+    <div class="glass-panel p-lg rounded-lg">
+      <div class="flex justify-between items-start mb-sm">
+        <span class="text-on-surface-variant text-[12px] font-bold uppercase tracking-widest">Rate Limited</span>
+        <span class="material-symbols-outlined text-tertiary">speed</span>
+      </div>
+      <div class="flex items-baseline gap-sm">
+        <h3 class="font-metric-lg text-metric-lg text-tertiary">{formatCount($stats.rate_limited)}</h3>
+        {#if $stats.total_requests > 0}
+          <span class="text-tertiary/60 text-body-sm font-code-md font-mono">({(($stats.rate_limited / $stats.total_requests) * 100).toFixed(2)}%)</span>
+        {/if}
+      </div>
+      <div class="mt-md h-1 bg-surface-container rounded-full overflow-hidden">
+        <div class="h-full bg-tertiary" style="width: {$stats.total_requests > 0 ? ($stats.rate_limited / $stats.total_requests) * 100 : 0}%"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Content Bento Grid -->
+  <div class="grid grid-cols-12 gap-lg">
+    <!-- Agent Nodes (Live Health) -->
+    <section class="col-span-12 lg:col-span-4 glass-panel rounded-lg overflow-hidden flex flex-col">
+      <div class="px-md py-sm border-b border-outline-variant flex justify-between items-center bg-surface-container-low">
+        <h4 class="text-body-sm font-bold flex items-center gap-xs text-on-surface">
+          <span class="material-symbols-outlined text-[18px]">dns</span>
+          Agent Nodes
+        </h4>
+        <span class="text-[10px] font-code-md text-on-surface-variant">Active: {agents.filter(a => a.status === 'online').length}/{agents.length}</span>
+      </div>
+
+      <div class="p-md space-y-md flex-1 overflow-y-auto">
+        {#if agents.length === 0}
+          <div class="text-center py-8 text-on-surface-variant font-code-md text-xs">
+            No WAF agents connected.<br/>
+            Run the install command on your agent server:
+            <div class="mt-2 p-2 bg-surface-container-lowest border border-outline-variant/30 rounded text-left overflow-x-auto text-[10px] whitespace-nowrap">
+              <code>curl -sSL {controllerUrl}/install.sh | bash</code>
             </div>
-            <div class="agent-uptime-badge font-mono">UPTIME: {agent.uptime}</div>
           </div>
-
-          <div class="agent-diagnostics-grid">
-            <!-- CPU Gauge -->
-            <div class="diag-group">
-              <div class="diag-lbl-row">
-                <span class="diag-lbl">CPU Usage</span>
-                <span class="diag-val font-mono">{Math.round(agent.cpu)}%</span>
-              </div>
-              <div class="progress-bar-container">
-                <div class="progress-bar-fill fill-cpu" style="width: {agent.cpu}%"></div>
-              </div>
-            </div>
-
-            <!-- Memory Gauge -->
-            <div class="diag-group">
-              <div class="diag-lbl-row">
-                <span class="diag-lbl">RAM Usage</span>
-                <span class="diag-val font-mono">{Math.round(agent.ram)}%</span>
-              </div>
-              <div class="progress-bar-container">
-                <div class="progress-bar-fill fill-ram" style="width: {agent.ram}%"></div>
-              </div>
-            </div>
-
-            <!-- Disk Gauge -->
-            <div class="diag-group">
-              <div class="diag-lbl-row">
-                <span class="diag-lbl">Disk Storage</span>
-                <span class="diag-val font-mono">{Math.round(agent.disk)}%</span>
-              </div>
-              <div class="progress-bar-container">
-                <div class="progress-bar-fill fill-disk" style="width: {agent.disk}%"></div>
-              </div>
-            </div>
-
-            <!-- OS Platform -->
-            <div class="diag-group text-center">
-              <span class="diag-lbl">Platform</span>
-              <div class="latency-val font-mono text-pass" style="text-transform: capitalize; font-size: 0.9rem;">{agent.os}</div>
-              {#if agent.network_interfaces && agent.network_interfaces.length > 0}
-                <div style="margin-top: 0.5rem;">
-                  <span class="diag-lbl" style="display:block; margin-bottom: 0.2rem; font-size: 0.65rem;">eBPF Interface</span>
-                  <select class="interface-select font-mono">
-                    {#each agent.network_interfaces as iface}
-                      <option value={iface}>{iface}</option>
-                    {/each}
-                  </select>
+        {:else}
+          {#each agents as agent}
+            <div class="space-y-sm bg-surface-container-lowest/30 p-3 rounded border border-outline-variant/20">
+              <div class="flex justify-between items-center">
+                <div class="flex items-center gap-1.5">
+                  <span class="w-2 h-2 rounded-full {agent.status === 'online' ? 'bg-primary pulse-dot' : 'bg-secondary'}"></span>
+                  <span class="text-xs font-bold text-on-surface">{agent.hostname}</span>
+                  <span class="text-[10px] font-mono text-on-surface-variant">({agent.ip})</span>
                 </div>
-              {/if}
-            </div>
-          </div>
+                <span class="text-[9px] font-mono bg-surface-container px-1.5 py-0.5 rounded text-on-surface-variant uppercase">{agent.os}</span>
+              </div>
 
-          <!-- Discovered Services -->
-          {#if agent.discovered_services && agent.discovered_services.length > 0}
-            <div class="discovered-services-container">
-              <h4 class="services-title">Discovered Services</h4>
-              <div class="services-grid">
-                {#each agent.discovered_services as svc}
-                  <div class="service-card">
-                    <span class="service-icon">{svc.source === 'Docker' ? '🐳' : '🔌'}</span>
-                    <div class="service-info">
-                      <span class="service-name font-mono">{svc.name}</span>
-                      <span class="service-port font-mono">{svc.port}/{svc.protocol}</span>
-                    </div>
-                    <button class="protect-btn" title="Create Virtual Host">
-                      Protect
-                    </button>
-                  </div>
-                {/each}
+              <!-- Metrics -->
+              <div class="space-y-xs">
+                <div class="flex justify-between text-[11px] font-code-md uppercase">
+                  <span class="text-primary">{agent.hostname}</span>
+                  <span class="text-on-surface-variant font-mono">{Math.round(agent.cpu)}% CPU</span>
+                </div>
+                <!-- CPU bar -->
+                <div class="h-1.5 bg-surface-container rounded-full overflow-hidden flex">
+                  <div class="h-full {agent.cpu > 80 ? 'bg-error' : 'bg-primary'}" style="width: {agent.cpu}%"></div>
+                </div>
+                <!-- RAM bar -->
+                <div class="h-1 bg-surface-container rounded-full overflow-hidden flex">
+                  <div class="h-full bg-primary/40" style="width: {agent.ram}%"></div>
+                </div>
+              </div>
+
+              <div class="text-[9px] font-code-md text-on-surface-variant flex justify-between pt-1">
+                <span>Uptime: {agent.uptime}</span>
+                {#if agent.network_interfaces && agent.network_interfaces.length > 0}
+                  <span>Interface: {agent.network_interfaces[0]}</span>
+                {/if}
               </div>
             </div>
-          {/if}
-        </div>
-      {/each}
-    </div>
-  {/if}
-
-  <!-- Configuration Summary and Disk Storage -->
-  <div class="grid-cols-2">
-    <!-- WAF Specs summary -->
-    <div class="card">
-      <h3 class="panel-subtitle">Operational Configuration Summary</h3>
-      <div class="spec-summary-list">
-        <div class="spec-item">
-          <span class="spec-lbl">Active Routing Hostnames:</span>
-          <span class="spec-val font-bold">{activeVhostsCount} Domains</span>
-        </div>
-        <div class="spec-item">
-          <span class="spec-lbl">SSL Certificates Enforced:</span>
-          <span class="spec-val font-bold">Auto Local CA</span>
-        </div>
-        <div class="spec-item">
-          <span class="spec-lbl">WAF Rules Toggled:</span>
-          <span class="spec-val font-bold">{totalRulesToggled} Rules Active</span>
-        </div>
-        <div class="spec-item">
-          <span class="spec-lbl">Distributed Nodes:</span>
-          <span class="spec-val font-bold">2 Online Agents</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Storage and Cap -->
-    <div class="card storage-cap-card">
-      <h3 class="panel-subtitle">Access Logs Database Capacity</h3>
-      <div class="storage-meters">
-        <div class="storage-lbl-row">
-          <span>Central Database Usage</span>
-          <span class="font-mono"><strong>{$dbSize}</strong> / {logLimitMb} MB</span>
-        </div>
-        <div class="progress-bar-container storage-bar">
-          <div class="progress-bar-fill fill-storage" style="width: 1%"></div>
-        </div>
-        <p class="text-muted storage-desc">
-          When the log database exceeds {logLimitMb} MB, the Controller automatically prunes the oldest 1000 requests.
-        </p>
-      </div>
-    </div>
-  </div>
-
-  <!-- Active Domain Routing Table -->
-  <div class="card">
-    <h3 class="panel-subtitle" style="margin-bottom: 1rem;">Active Domain Routing Map</h3>
-    <div class="table-card" style="padding: 0; overflow: hidden; border: 1px solid var(--border-card); border-radius: 6px;">
-      <table class="routing-table">
-        <thead>
-          <tr>
-            <th>Domain Pattern</th>
-            <th>Backend Proxy Address</th>
-            <th>SSL Protection</th>
-            <th>Custom Rule count</th>
-            <th>Geo Lock</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each vhosts as host}
-            <tr>
-              <td class="font-bold font-mono text-pass">{host.hosts[0]}</td>
-              <td class="font-mono">{host.backend}</td>
-              <td>
-                <span class="ssl-status-badge {host.ssl !== 'Disabled' ? 'ssl-ok' : 'ssl-off'}">
-                  {host.ssl}
-                </span>
-              </td>
-              <td class="font-mono">{host.custom_rules ? host.custom_rules.length : 0} Rules</td>
-              <td>
-                {#if host.blocked_countries.length > 0}
-                  <span class="geo-status-badge geo-locked">🔒 {host.geoblock_type} ({host.blocked_countries.length})</span>
-                {:else}
-                  <span class="geo-status-badge geo-open">🔓 Open Access</span>
-                {/if}
-              </td>
-            </tr>
-          {:else}
-            <tr>
-              <td colspan="5" class="text-center text-muted font-mono" style="padding: 2rem;">No virtual host maps loaded</td>
-            </tr>
           {/each}
-        </tbody>
-      </table>
-    </div>
+        {/if}
+      </div>
+    </section>
+
+    <!-- Active VHosts Table -->
+    <section class="col-span-12 lg:col-span-8 glass-panel rounded-lg overflow-hidden flex flex-col">
+      <div class="px-md py-sm border-b border-outline-variant flex justify-between items-center bg-surface-container-low">
+        <h4 class="text-body-sm font-bold flex items-center gap-xs text-on-surface">
+          <span class="material-symbols-outlined text-[18px]">public</span>
+          Active VHosts
+        </h4>
+        <span class="text-[10px] font-code-md text-on-surface-variant">Active Routers: {vhosts.length}</span>
+      </div>
+
+      <div class="overflow-x-auto flex-1">
+        <table class="w-full text-left font-body-sm text-body-sm">
+          <thead class="bg-surface-container text-on-surface-variant text-[11px] uppercase font-bold">
+            <tr>
+              <th class="px-md py-sm">VHost Name</th>
+              <th class="px-md py-sm">Backend Address</th>
+              <th class="px-md py-sm">SSL Status</th>
+              <th class="px-md py-sm">Rules</th>
+              <th class="px-md py-sm text-right">Geo Lock</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-outline-variant/30">
+            {#each vhosts as host}
+              <tr class="hover:bg-surface-container-low/50 transition-colors">
+                <td class="px-md py-md font-bold text-on-surface font-mono">{host.hosts[0]}</td>
+                <td class="px-md py-md font-code-md text-on-surface-variant">{host.backend}</td>
+                <td class="px-md py-md">
+                  <div class="flex items-center gap-xs">
+                    {#if host.ssl !== 'Disabled'}
+                      <span class="material-symbols-outlined text-[14px] text-primary" style="font-variation-settings: 'FILL' 1;">verified_user</span>
+                      <span class="text-[11px] uppercase font-bold text-primary">{host.ssl}</span>
+                    {:else}
+                      <span class="material-symbols-outlined text-[14px] text-on-surface-variant">lock_open</span>
+                      <span class="text-[11px] uppercase font-bold text-on-surface-variant">Disabled</span>
+                    {/if}
+                  </div>
+                </td>
+                <td class="px-md py-md font-code-md text-on-surface-variant">{(host.rules ? host.rules.length : 0) + (host.custom_rules ? host.custom_rules.length : 0)} rules</td>
+                <td class="px-md py-md text-right">
+                  {#if host.blocked_countries && host.blocked_countries.length > 0}
+                    <span class="text-[10px] font-bold text-secondary uppercase bg-secondary-container/10 border border-secondary/20 px-1.5 py-0.5 rounded">
+                      🔒 {host.geoblock_type} ({host.blocked_countries.length})
+                    </span>
+                  {:else}
+                    <span class="text-[10px] font-bold text-primary uppercase bg-primary-container/10 border border-primary/20 px-1.5 py-0.5 rounded">
+                      🔓 Open
+                    </span>
+                  {/if}
+                </td>
+              </tr>
+            {:else}
+              <tr>
+                <td colspan="5" class="px-md py-md text-center text-on-surface-variant font-code-md col-span-5">No Virtual Hosts configured</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    </section>
   </div>
 
-  <!-- Collaborative Threat Intel Blocklist -->
-  <div class="card">
-    <div class="blocklist-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
-      <h3 class="panel-subtitle">Collaborative IP Threat Intelligence (Active Blocks)</h3>
-      <span class="threat-intel-badge badge-collab">Reputation Network Active</span>
+  <!-- Security Event Log (Live Stream) -->
+  <section class="glass-panel rounded-lg overflow-hidden">
+    <div class="px-md py-sm border-b border-outline-variant flex justify-between items-center bg-surface-container-low">
+      <h4 class="text-body-sm font-bold flex items-center gap-xs text-on-surface">
+        <span class="material-symbols-outlined text-[18px]">terminal</span>
+        Security Event Log (Live Stream)
+      </h4>
+      <div class="flex gap-md items-center">
+        <div class="flex items-center gap-xs">
+          <span class="w-1.5 h-1.5 rounded-full bg-primary pulse-dot"></span>
+          <span class="text-[10px] font-code-md uppercase text-primary">Connected</span>
+        </div>
+        <span class="text-[10px] font-code-md text-on-surface-variant">DB Size: {$dbSize}</span>
+      </div>
     </div>
     
-    <div class="blocklist-content">
-      {#if blockedIps.length > 0}
-        <p class="text-muted" style="font-size: 0.8rem; margin: 0 0 1rem 0;">
-          The following IPs generated 5+ attacks in 5 minutes and are dynamically blocked at the network entry layer:
-        </p>
-        <div class="blocked-ips-container" style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
-          {#each blockedIps as ip}
-            <span class="blocked-ip-tag font-mono">
-              <span class="dot offline" style="width: 6px; height: 6px; margin-right: 6px;"></span>
-              {ip}
-              <span class="block-indicator-label">BLOCKED</span>
-            </span>
-          {/each}
+    <div class="p-md font-code-md text-code-md h-48 overflow-y-auto terminal-scroll bg-surface-container-lowest" id="event-log">
+      {#if $logs.length === 0}
+        <div class="text-on-surface-variant text-center py-12 text-xs italic">
+          Waiting for security event activity...
         </div>
       {:else}
-        <div class="empty-blocklist text-center" style="padding: 2rem 1rem;">
-          <span style="font-size: 2rem; display: block; margin-bottom: 0.5rem;">🛡️</span>
-          <p class="font-bold text-pass" style="margin: 0; font-size: 0.9rem;">No Active IP Threat Blocks</p>
-          <p class="text-muted" style="margin: 0.25rem 0 0 0; font-size: 0.78rem;">
-            No IPs are currently flagged for collaborative blocklisting. The reputation network is clean.
-          </p>
-        </div>
+        {#each $logs.slice(0, 50) as log}
+          <div class="flex gap-md {log.action === 'ALLOW' || log.action === 'PASS' ? 'opacity-70' : 'opacity-100'} mb-1.5 leading-tight">
+            <span class="text-on-surface-variant shrink-0">[{formatTime(log.timestamp)}]</span>
+            <span class="shrink-0 font-bold {log.action === 'ALLOW' || log.action === 'PASS' ? 'text-primary' : log.action === 'BLOCK' ? 'text-secondary' : 'text-tertiary'}">{log.action}</span>
+            <span class="text-on-surface truncate">
+              {log.method} <span class="text-on-surface-variant">{log.path}</span> - <span class="font-bold">{log.client_ip}</span> 
+              {#if log.reason}
+                <span class="text-on-surface-variant">({log.reason})</span>
+              {/if}
+            </span>
+          </div>
+        {/each}
       {/if}
     </div>
-  </div>
+  </section>
 </div>
 
 <style>
-  .overview-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 1.25rem;
-  }
-
-  .section-title {
-    font-size: 0.95rem;
-    font-weight: 700;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    margin: 0.5rem 0 0 0;
-  }
-
-  .panel-subtitle {
-    font-size: 0.95rem;
-    font-weight: 700;
-    color: #ffffff;
-    margin: 0;
-  }
-
-  /* Status Banner Card */
-  .status-banner-card {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 1.25rem 1.5rem;
-    flex-wrap: wrap;
-    gap: 1rem;
-  }
-
-  .bg-pass-glow {
-    background: linear-gradient(135deg, rgba(16, 185, 129, 0.05) 0%, rgba(5, 5, 8, 0.3) 100%);
-    border: 1px solid rgba(16, 185, 129, 0.25);
-    box-shadow: 0 0 15px rgba(16, 185, 129, 0.05);
-  }
-
-  .banner-left {
-    display: flex;
-    align-items: center;
-    gap: 1.25rem;
-  }
-
-  .status-badge-pulse {
-    background-color: var(--color-pass);
-    color: #050508;
-    padding: 0.3rem 0.75rem;
-    font-size: 0.75rem;
-    font-weight: 800;
-    border-radius: 4px;
-    letter-spacing: 0.8px;
-    box-shadow: 0 0 10px rgba(16, 185, 129, 0.4);
-  }
-
-  .banner-text h4 {
-    color: white;
-    font-size: 1.05rem;
-    margin: 0 0 0.15rem 0;
-    font-weight: 700;
-  }
-
-  .banner-text p {
-    margin: 0;
-    font-size: 0.8rem;
-  }
-
-  .banner-right {
-    display: flex;
-    align-items: center;
-  }
-
-  .metric-group {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-  }
-
-  .m-val {
-    font-size: 1.8rem;
-    font-weight: 800;
-    color: var(--color-pass);
-    line-height: 1.1;
-  }
-
-  .m-lbl {
-    font-size: 0.65rem;
-    color: var(--text-muted);
-    letter-spacing: 0.5px;
-    font-weight: 600;
-  }
-
-  /* Diagnostic Agent cards */
-  .agent-diagnostic-card {
-    padding: 1.25rem 1.5rem;
-  }
-
-  .agent-hdr {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    border-bottom: 1px solid var(--border-card);
-    padding-bottom: 0.6rem;
-    margin-bottom: 0.85rem;
-  }
-
-  .agent-title-info {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-
-  .agent-ip-sub {
-    font-size: 0.75rem;
-    color: var(--text-muted);
-  }
-
-  .agent-uptime-badge {
-    font-size: 0.72rem;
-    color: var(--text-muted);
-    background-color: rgba(255,255,255,0.03);
-    padding: 0.15rem 0.4rem;
-    border-radius: 4px;
-  }
-
-  .agent-diagnostics-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr 1fr 120px;
-    gap: 1rem;
-    align-items: center;
-  }
-
-  .diag-group {
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-  }
-
-  .diag-lbl-row {
-    display: flex;
-    justify-content: space-between;
-    font-size: 0.75rem;
-  }
-
-  .diag-lbl {
-    color: var(--text-muted);
-  }
-
-  .diag-val {
-    color: white;
-    font-weight: 600;
-  }
-
-  .latency-val {
-    font-size: 1.2rem;
-    font-weight: 800;
-    margin-top: 0.1rem;
-  }
-
-  .text-center {
-    text-align: center;
-  }
-
-  .progress-bar-container {
-    background-color: rgba(255, 255, 255, 0.04);
-    height: 6px;
-    border-radius: 3px;
-    overflow: hidden;
-    width: 100%;
-  }
-
-  .progress-bar-fill {
-    height: 100%;
-    border-radius: 3px;
-    transition: width 0.4s ease-out;
-  }
-
-  .fill-cpu {
-    background-color: #3b82f6; /* Blue */
-  }
-
-  .fill-ram {
-    background-color: #a855f7; /* Purple */
-  }
-
-  .fill-disk {
-    background-color: #eab308; /* Yellow */
-  }
-
-  .fill-storage {
-    background-color: #38bdf8; /* Sky blue */
-  }
-
-  /* Configuration Specs styling */
-  .spec-summary-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.65rem;
-    margin-top: 1rem;
-  }
-
-  .spec-item {
-    display: flex;
-    justify-content: space-between;
-    font-size: 0.85rem;
-    padding-bottom: 0.5rem;
-    border-bottom: 1px dashed rgba(255,255,255,0.03);
-  }
-
-  .spec-item:last-child {
-    border-bottom: none;
-    padding-bottom: 0;
-  }
-
-  .spec-lbl {
-    color: var(--text-muted);
-  }
-
-  .spec-val {
-    color: white;
-  }
-
-  /* Capacity and Storage meters */
-  .storage-cap-card {
-    display: flex;
-    flex-direction: column;
-  }
-
-  .storage-meters {
-    display: flex;
-    flex-direction: column;
-    margin-top: 1rem;
-    gap: 0.5rem;
-  }
-
-  .storage-lbl-row {
-    display: flex;
-    justify-content: space-between;
-    font-size: 0.85rem;
-    color: white;
-  }
-
-  .storage-bar {
-    height: 8px;
-    border-radius: 4px;
-    margin-top: 0.25rem;
-  }
-
-  .storage-desc {
-    font-size: 0.75rem;
-    line-height: 1.4;
-    margin: 0.25rem 0 0 0;
-  }
-
-  /* Domain Routing Table */
-  .routing-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.85rem;
-    text-align: left;
-  }
-
-  .routing-table th {
-    background-color: rgba(0, 0, 0, 0.25);
-    border-bottom: 1px solid var(--border-card);
-    padding: 0.8rem 1rem;
-    color: var(--text-muted);
-    font-weight: 600;
-    text-transform: uppercase;
-    font-size: 0.72rem;
-    letter-spacing: 0.5px;
-  }
-
-  .routing-table td {
-    padding: 0.8rem 1rem;
-    border-bottom: 1px solid var(--border-card);
-    color: var(--text-main);
-  }
-
-  .routing-table tr:last-child td {
-    border-bottom: none;
-  }
-
-  .routing-table tr:hover {
-    background-color: rgba(255, 255, 255, 0.01);
-  }
-
-  .ssl-status-badge {
-    font-size: 0.75rem;
-    padding: 0.15rem 0.4rem;
-    border-radius: 4px;
-    font-weight: 700;
-  }
-
-  .ssl-ok {
-    background-color: rgba(16, 185, 129, 0.1);
-    color: var(--color-pass);
-  }
-
-  .ssl-off {
-    background-color: rgba(255, 255, 255, 0.05);
-    color: var(--text-muted);
-  }
-
-  .geo-status-badge {
-    font-size: 0.75rem;
-    padding: 0.15rem 0.4rem;
-    border-radius: 4px;
-    font-weight: 600;
-  }
-
-  .geo-locked {
-    background-color: rgba(244, 63, 94, 0.1);
-    color: var(--color-critical);
-    border: 1px solid rgba(244, 63, 94, 0.15);
-  }
-
-  .geo-open {
-    background-color: rgba(16, 185, 129, 0.1);
-    color: var(--color-pass);
-    border: 1px solid rgba(16, 185, 129, 0.15);
-  }
-
-  .badge-collab {
-    background-color: rgba(59, 130, 246, 0.1);
-    color: #3b82f6;
-    border: 1px solid rgba(59, 130, 246, 0.25);
-    font-size: 0.7rem;
-    font-weight: 700;
-    padding: 0.15rem 0.4rem;
-    border-radius: 4px;
-    text-transform: uppercase;
-  }
-
-  .blocked-ip-tag {
-    display: inline-flex;
-    align-items: center;
-    background-color: rgba(244, 63, 94, 0.08);
-    color: var(--color-critical);
-    border: 1px solid rgba(244, 63, 94, 0.18);
-    padding: 0.35rem 0.65rem;
-    border-radius: 4px;
-    font-size: 0.82rem;
-    font-weight: 600;
-  }
-
-  .block-indicator-label {
-    font-size: 0.6rem;
-    font-weight: 800;
-    background-color: var(--color-critical);
-    color: #050508;
-    padding: 0.05rem 0.25rem;
-    border-radius: 2px;
-    margin-left: 8px;
-    letter-spacing: 0.5px;
-  }
-
-  .no-agents-card {
-    grid-column: span 2;
-    padding: 3rem 2rem;
-    text-align: center;
-    border: 1px solid rgba(244, 63, 94, 0.2);
-    background: linear-gradient(135deg, rgba(244, 63, 94, 0.03) 0%, rgba(5, 5, 8, 0.4) 100%);
-    box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
-  }
-
-  .no-agents-content {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    max-width: 600px;
-    margin: 0 auto;
-  }
-
-  .icon-warning {
-    width: 48px;
-    height: 48px;
-    color: var(--color-critical);
-    margin-bottom: 1.5rem;
-    filter: drop-shadow(0 0 8px rgba(244, 63, 94, 0.4));
-  }
-
-  .no-agents-content h4 {
-    font-size: 1.25rem;
-    color: #fff;
-    margin-bottom: 0.75rem;
-    font-weight: 700;
-  }
-
-  .no-agents-content p {
-    color: var(--text-muted);
-    font-size: 0.9rem;
-    line-height: 1.5;
-    margin-bottom: 1.5rem;
-  }
-
-  .code-install-box {
-    background-color: #0b0b10;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 6px;
-    padding: 1rem 1.5rem;
-    width: 100%;
-    text-align: left;
-    overflow-x: auto;
+  .glass-panel {
+    background: #0d1117;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-top: 1px solid rgba(255, 255, 255, 0.12);
     position: relative;
   }
 
-  .code-install-box code {
-    color: var(--color-pass);
-    font-size: 0.85rem;
-    white-space: nowrap;
+  .cyan-glow {
+    box-shadow: 0 0 20px rgba(0, 212, 255, 0.05);
   }
 
-  .interface-select {
-    background: rgba(0,0,0,0.3);
-    border: 1px solid rgba(255,255,255,0.1);
-    color: white;
-    font-size: 0.7rem;
-    padding: 0.2rem 0.4rem;
-    border-radius: 4px;
-    width: 100%;
+  .terminal-scroll::-webkit-scrollbar {
+    width: 4px;
+  }
+  .terminal-scroll::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .terminal-scroll::-webkit-scrollbar-thumb {
+    background: #33353a;
+    border-radius: 2px;
   }
 
-  .discovered-services-container {
-    margin-top: 1.25rem;
-    padding-top: 1rem;
-    border-top: 1px dashed rgba(255,255,255,0.05);
+  @keyframes pulse-cyan {
+    0% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(1.1); }
+    100% { opacity: 1; transform: scale(1); }
   }
-
-  .services-title {
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    margin: 0 0 0.75rem 0;
-    letter-spacing: 0.5px;
-  }
-
-  .services-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-    gap: 0.75rem;
-  }
-
-  .service-card {
-    display: flex;
-    align-items: center;
-    background: rgba(255,255,255,0.02);
-    border: 1px solid rgba(255,255,255,0.05);
-    padding: 0.5rem 0.75rem;
-    border-radius: 6px;
-    gap: 0.75rem;
-  }
-
-  .service-icon {
-    font-size: 1.2rem;
-  }
-
-  .service-info {
-    display: flex;
-    flex-direction: column;
-    flex: 1;
-  }
-
-  .service-name {
-    font-size: 0.75rem;
-    color: white;
-    font-weight: 600;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 100px;
-  }
-
-  .service-port {
-    font-size: 0.65rem;
-    color: var(--text-muted);
-  }
-
-  .protect-btn {
-    background: rgba(16, 185, 129, 0.1);
-    color: var(--color-pass);
-    border: 1px solid rgba(16, 185, 129, 0.2);
-    padding: 0.25rem 0.5rem;
-    border-radius: 4px;
-    font-size: 0.65rem;
-    font-weight: 700;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-
-  .protect-btn:hover {
-    background: rgba(16, 185, 129, 0.2);
-    border-color: rgba(16, 185, 129, 0.4);
+  .pulse-dot {
+    animation: pulse-cyan 2s infinite ease-in-out;
   }
 </style>

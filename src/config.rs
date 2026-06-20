@@ -29,6 +29,7 @@ pub struct GlobalConfig {
     pub log_dir: String,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    pub trusted_proxies: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

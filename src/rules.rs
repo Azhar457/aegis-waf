@@ -5,6 +5,7 @@ pub mod body;
 use std::collections::HashMap;
 use dashmap::DashMap;
 use std::net::IpAddr;
+use unicode_normalization::UnicodeNormalization;
 
 use tokio::time::Instant;
 use once_cell::sync::Lazy;
@@ -83,10 +84,9 @@ pub fn record_block(ip: IpAddr) -> bool {
     if *count >= 5 {
         let ip_clone = ip;
         tokio::spawn(async move {
-            if let Ok(mut xdp) = crate::XDP_MANAGER.try_lock() {
-                if let IpAddr::V4(v4) = ip_clone {
-                    let _ = xdp.block_ip(v4);
-                }
+            let mut xdp = crate::XDP_MANAGER.lock().await;
+            if let IpAddr::V4(v4) = ip_clone {
+                let _ = xdp.block_ip(v4);
             }
         });
         true
@@ -180,10 +180,19 @@ pub fn normalize_string(input: &str) -> String {
         }
     }
     
-    // 2. Lowercase for uniform signature matching
+    // 2. HTML Entity Decode (&lt; -> <, &gt; -> >, etc.)
+    normalized = htmlescape::decode_html(&normalized).unwrap_or(normalized);
+    
+    // 3. Unicode NFKC Normalization (prevents fullwidth and homoglyph bypasses)
+    normalized = normalized.nfkc().collect::<String>();
+    
+    // 4. Lowercase for uniform signature matching
     normalized = normalized.to_lowercase();
     
-    // 3. Strip Null Bytes & Collapse Whitespace
+    // Convert '+' to ' ' to handle form-urlencoded space encoding and prevent bypasses
+    normalized = normalized.replace('+', " ");
+    
+    // 5. Strip Null Bytes & Collapse Whitespace
     normalized = normalized.replace('\0', "");
     normalized = normalized.split_whitespace().collect::<Vec<&str>>().join(" ");
     
@@ -342,6 +351,27 @@ mod tests {
             "username=admin' OR 1=1 --",
             None,
             "POST",
+            &[],
+        );
+        assert!(result.is_some());
+        let (rule_id, msg) = result.unwrap();
+        assert_eq!(rule_id, "SQLI-001");
+        assert!(msg.contains("SQL Injection"));
+    }
+
+    #[test]
+    fn test_sqli_001_query_blocked() {
+        let engine = RuleEngine::new(&test_config());
+        let headers = HashMap::new();
+
+        // Testing SQLi in query string with '+' representation for spaces
+        let result = engine.check_request(
+            "/vulnerabilities/sqli/",
+            "id=%27+OR+1%3D1--&Submit=Submit",
+            &headers,
+            "",
+            None,
+            "GET",
             &[],
         );
         assert!(result.is_some());

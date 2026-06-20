@@ -73,64 +73,73 @@ static UPLOAD_002_REGEX: Lazy<Regex> = Lazy::new(|| {
 });
 
 // Check functions
+fn matches_payload(req: &RequestInfo, regex: &Regex) -> bool {
+    regex.is_match(req.body) || regex.is_match(req.query) || regex.is_match(req.path)
+}
+
 fn check_sqli_001(req: &RequestInfo) -> bool {
-    SQLI_001_REGEX.is_match(req.body)
+    matches_payload(req, &SQLI_001_REGEX)
 }
 
 fn check_sqli_002(req: &RequestInfo) -> bool {
-    SQLI_002_REGEX.is_match(req.body)
+    matches_payload(req, &SQLI_002_REGEX)
 }
 
 fn check_sqli_003(req: &RequestInfo) -> bool {
-    SQLI_003_REGEX.is_match(req.body)
+    matches_payload(req, &SQLI_003_REGEX)
 }
 
 fn check_sqli_004(req: &RequestInfo) -> bool {
-    SQLI_004_REGEX.is_match(req.body)
+    matches_payload(req, &SQLI_004_REGEX)
 }
 
 fn check_xss_001(req: &RequestInfo) -> bool {
-    XSS_001_REGEX.is_match(req.body)
+    matches_payload(req, &XSS_001_REGEX)
 }
 
 fn check_xss_002(req: &RequestInfo) -> bool {
-    XSS_002_REGEX.is_match(req.body)
+    matches_payload(req, &XSS_002_REGEX)
 }
 
 fn check_xss_003(req: &RequestInfo) -> bool {
-    XSS_003_REGEX.is_match(req.body)
+    matches_payload(req, &XSS_003_REGEX)
 }
 
 fn check_xss_004(req: &RequestInfo) -> bool {
-    XSS_004_REGEX.is_match(req.body)
+    matches_payload(req, &XSS_004_REGEX)
 }
 
 fn check_ssti_001(req: &RequestInfo) -> bool {
-    SSTI_001_REGEX.is_match(req.body)
+    matches_payload(req, &SSTI_001_REGEX)
 }
 
 fn check_ssti_002(req: &RequestInfo) -> bool {
-    SSTI_002_REGEX.is_match(req.body)
+    matches_payload(req, &SSTI_002_REGEX)
 }
 
 fn check_xxe_001(req: &RequestInfo) -> bool {
-    XXE_001_REGEX.is_match(req.body)
+    matches_payload(req, &XXE_001_REGEX)
 }
 
 fn check_xxe_002(req: &RequestInfo) -> bool {
-    XXE_002_REGEX.is_match(req.body)
+    matches_payload(req, &XXE_002_REGEX)
 }
 
 fn check_cmdi_001(req: &RequestInfo) -> bool {
-    CMDI_001_REGEX.is_match(req.body)
+    matches_payload(req, &CMDI_001_REGEX)
 }
 
 fn check_cmdi_002(req: &RequestInfo) -> bool {
-    CMDI_002_REGEX.is_match(req.body)
+    matches_payload(req, &CMDI_002_REGEX)
 }
 
 fn check_csrf_001(req: &RequestInfo) -> bool {
     if !matches!(req.method, "POST" | "PUT" | "PATCH" | "DELETE") {
+        return false;
+    }
+    let content_type = req.headers.get("content-type").map(|s| s.as_str()).unwrap_or("");
+    // Hanya check untuk form submissions (klasik CSRF)
+    if !content_type.contains("application/x-www-form-urlencoded") && !content_type.contains("multipart/form-data") {
         return false;
     }
     let origin = req.headers.get("origin");
@@ -139,6 +148,9 @@ fn check_csrf_001(req: &RequestInfo) -> bool {
 }
 
 fn check_csrf_002(req: &RequestInfo) -> bool {
+    if !matches!(req.method, "POST" | "PUT" | "PATCH" | "DELETE") {
+        return false;
+    }
     let content_type = req.headers.get("content-type").map(|s| s.as_str()).unwrap_or("");
     let origin = req.headers.get("origin");
     content_type.contains("application/json") && origin.is_none()
@@ -307,7 +319,7 @@ pub static BODY_RULES: &[Rule] = &[
         id: "CSRF-001",
         name: "CSRF - Missing Origin/Referer (Basic)",
         phase: Phase::Body,
-        action: Action::Block,
+        action: Action::Log,
         severity: Severity::Medium,
         description: "State-changing request without Origin or Referer header",
         check: check_csrf_001,
@@ -316,7 +328,7 @@ pub static BODY_RULES: &[Rule] = &[
         id: "CSRF-002",
         name: "CSRF - JSON Content-Type (Advanced)",
         phase: Phase::Body,
-        action: Action::Block,
+        action: Action::Log,
         severity: Severity::Medium,
         description: "JSON request without proper CORS/Origin validation",
         check: check_csrf_002,

@@ -384,7 +384,7 @@ async fn run_agent(config_path: &str, controller: Option<String>, token: Option<
     // Build application state
     let blocklist = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
     let state = AppState {
-        config: config_arc,
+        config: config_arc.clone(),
         log_tx,
         blocklist: blocklist.clone(),
     };
@@ -457,6 +457,99 @@ async fn run_agent(config_path: &str, controller: Option<String>, token: Option<
         .route("/", any(handler))
         .route("/*path", any(handler))
         .with_state(state);
+
+    // Bind HTTPS if configured
+    let tls_cfg = cfg.tls.clone();
+    let config_arc_tls = config_arc.clone();
+    let app_tls = app.clone();
+    let port_https = cfg.global.port_https;
+
+    if tls_cfg.mode == "local_ca" {
+        tokio::spawn(async move {
+            let ca = tls::LocalCA::new(&tls_cfg.cert_dir);
+            if let Err(e) = ca.ensure_ca() {
+                tracing::error!("Failed to ensure local CA: {}", e);
+                return;
+            }
+
+            let domain = {
+                let lock = config_arc_tls.read().unwrap();
+                lock.vhosts.first()
+                    .and_then(|v| v.hosts.first())
+                    .map(|h| h.clone())
+                    .unwrap_or_else(|| "localhost".to_string())
+            };
+
+            let (certs, key) = match ca.generate_server_cert(&domain) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    tracing::error!("Failed to generate server cert for {}: {}", domain, e);
+                    return;
+                }
+            };
+
+            let rustls_config = match rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(certs, key) {
+                    Ok(mut config) => {
+                        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+                        std::sync::Arc::new(config)
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to build ServerConfig: {}", e);
+                        return;
+                    }
+                };
+
+            let acceptor = tokio_rustls::TlsAcceptor::from(rustls_config);
+            let https_addr = SocketAddr::from(([0, 0, 0, 0], port_https));
+            let listener = match tokio::net::TcpListener::bind(https_addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::error!("Failed to bind HTTPS port {}: {}", port_https, e);
+                    return;
+                }
+            };
+
+            info!("Aegis Agent WAF listening on https://{} (HTTPS)", https_addr);
+
+            let service = app_tls.into_make_service_with_connect_info::<SocketAddr>();
+            loop {
+                let (stream, peer_addr) = match listener.accept().await {
+                    Ok(res) => res,
+                    Err(_) => continue,
+                };
+                let acceptor = acceptor.clone();
+                let mut service_clone = service.clone();
+
+                tokio::spawn(async move {
+                    let tls_stream = match acceptor.accept(stream).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("TLS handshake failed: {}", e);
+                            return;
+                        }
+                    };
+
+                    use hyper_util::rt::TokioIo;
+                    use tower::Service;
+                    let io = TokioIo::new(tls_stream);
+                    let builder = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+
+                    let route_service = match service_clone.call(peer_addr).await {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    };
+
+                    let hyper_service = hyper_util::service::TowerToHyperService::new(route_service);
+
+                    if let Err(err) = builder.serve_connection(io, hyper_service).await {
+                        tracing::error!("Error serving TLS connection: {:?}", err);
+                    }
+                });
+            }
+        });
+    }
 
     // Bind HTTP
     let http_addr = SocketAddr::from(([0, 0, 0, 0], cfg.global.port_http));
@@ -533,6 +626,7 @@ async fn run_controller(port: u16, config_path: String) {
 
     // Build Controller router
     let app = Router::new()
+        .route("/install.sh", get(serve_install_script))
         .route("/api/v1/agents/register", post(register_agent_handler))
         .route("/api/v1/agents/metrics", post(receive_metrics_handler))
         .route("/api/v1/agents", get(get_agents_handler))
@@ -542,6 +636,7 @@ async fn run_controller(port: u16, config_path: String) {
         .route("/api/v1/logs", get(get_logs_handler))
         .route("/api/v1/logs/db_size", get(get_db_size_handler))
         .route("/api/v1/logs/export", get(export_logs_handler))
+        .route("/api/v1/logs/clear", post(clear_logs_handler))
         .route("/api/v1/config", get(get_config_handler).post(post_config_handler))
         .route("/api/v1/vhosts", get(get_vhosts_handler).post(post_vhosts_handler))
         .route("/api/v1/stats", get(get_stats_handler))
@@ -580,6 +675,46 @@ struct ConfigPayload {
 struct DbSizeResponse {
     size_bytes: u64,
     formatted: String,
+}
+
+async fn serve_install_script(
+    State(_state): State<ControllerState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+) -> impl IntoResponse {
+    let controller_ip = std::env::var("CONTROLLER_URL")
+        .unwrap_or_else(|_| format!("http://{}:8080", addr.ip()));
+
+    let script = format!(r#"#!/bin/bash
+set -e
+echo "🛡️ Installing Aegis WAF Agent..."
+CONTROLLER_URL="${{CONTROLLER_IP:-{controller_ip}}}"
+echo "Controller URL: $CONTROLLER_URL"
+mkdir -p /etc/aegis-waf /var/log/aegis-waf
+# systemd service definition
+cat > /etc/systemd/system/aegis-agent.service <<EOF
+[Unit]
+Description=Aegis WAF Agent
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/aegis-agent agent --controller $CONTROLLER_URL
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+echo "✅ Aegis Agent installation script configuration completed."
+"#);
+
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/x-shellscript")],
+        script,
+    )
 }
 
 // Controller API & WS Handlers
@@ -861,6 +996,21 @@ async fn export_logs_handler(State(state): State<ControllerState>) -> impl IntoR
             }
         }
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "Failed to export logs from ClickHouse").into_response(),
+    }
+}
+
+async fn clear_logs_handler(State(state): State<ControllerState>) -> impl IntoResponse {
+    let client = crate::logging::build_client();
+    let query = "TRUNCATE TABLE request_log";
+    let url = format!("{}/?query={}", state.clickhouse_url.trim_end_matches('/'), urlencoding::encode(query));
+    match client.post(&url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            state.total_requests.store(0, Ordering::Relaxed);
+            state.blocked.store(0, Ordering::Relaxed);
+            state.rate_limited.store(0, Ordering::Relaxed);
+            StatusCode::OK
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 

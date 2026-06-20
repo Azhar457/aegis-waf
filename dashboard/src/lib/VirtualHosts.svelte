@@ -3,6 +3,8 @@
 
   export let controllerUrl = '';
   let vhosts: any[] = [];
+  let searchQuery = "";
+  let expandedHosts: { [key: string]: boolean } = {};
 
   let showModal = false;
   let isEditing = false;
@@ -111,6 +113,10 @@
     fetchVhosts();
   });
 
+  function toggleDetails(serverName: string) {
+    expandedHosts[serverName] = !expandedHosts[serverName];
+  }
+
   function openCreateModal() {
     isEditing = false;
     editIndex = null;
@@ -132,7 +138,8 @@
     showModal = true;
   }
 
-  function openEditModal(index: number) {
+  function openEditModal(index: number, event: Event) {
+    event.stopPropagation();
     isEditing = true;
     editIndex = index;
     const host = vhosts[index];
@@ -148,7 +155,7 @@
     selectedCategories = {
       sqli: host.rules.includes("SQLI-*"),
       xss: host.rules.includes("XSS-*"),
-      lfi: host.rules.includes("LFI-*"),
+      lfi: host.rules.includes("LFI-*") || host.rules.includes("RFI-*"),
       cmdi: host.rules.includes("CMDI-*"),
       ssrf: host.rules.includes("SSRF-*"),
       bot: host.rules.includes("BOT-*")
@@ -156,7 +163,34 @@
     showModal = true;
   }
 
-  function handleDeleteVhost(index: number) {
+  function duplicateVhost(index: number, event: Event) {
+    event.stopPropagation();
+    const host = vhosts[index];
+    isEditing = false;
+    editIndex = null;
+    
+    newServerName = host.server_name + "-copy";
+    newUpstream = host.upstream;
+    newSsl = host.ssl;
+    newMaxBody = host.max_body;
+    newRateLimit = host.rate_limit;
+    blockedCountries = [...(host.blocked_countries || [])];
+    geoblockType = host.geoblock_type || "Blocklist";
+    
+    selectedCategories = {
+      sqli: host.rules.includes("SQLI-*"),
+      xss: host.rules.includes("XSS-*"),
+      lfi: host.rules.includes("LFI-*") || host.rules.includes("RFI-*"),
+      cmdi: host.rules.includes("CMDI-*"),
+      ssrf: host.rules.includes("SSRF-*"),
+      bot: host.rules.includes("BOT-*")
+    };
+    showModal = true;
+  }
+
+  function handleDeleteVhost(index: number, event: Event) {
+    event.stopPropagation();
+    if (!confirm(`Are you sure you want to delete virtual host: ${vhosts[index].server_name}?`)) return;
     const updated = vhosts.filter((_, i) => i !== index);
     saveVhosts(updated);
   }
@@ -209,505 +243,411 @@
     saveVhosts(updated);
     showModal = false;
   }
+
+  $: filteredVhosts = vhosts.filter(h => 
+    h.server_name.toLowerCase().includes(searchQuery.toLowerCase()) || 
+    h.upstream.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
+  $: totalCerts = vhosts.filter(h => h.ssl !== 'Disabled').length;
 </script>
 
-<div class="vhosts-panel animate-fade-in">
-  <div class="panel-header">
-    <h3 class="panel-subtitle">Virtual Host Routing Rules</h3>
-    <button on:click={openCreateModal} class="btn btn-primary btn-sm">+ Add Virtual Host</button>
-  </div>
-
-  <div class="vhost-cards">
-    {#if vhosts.length === 0}
-      <div class="empty-state card">
-        <span class="empty-icon">🌐</span>
-        <h4>No Virtual Hosts Configured</h4>
-        <p>Click "+ Add Virtual Host" above to route your domains through the WAF.</p>
-      </div>
-    {/if}
-
-    {#each vhosts as host, i}
-      <div class="card vhost-card">
-        <div class="vhost-header">
-          <div class="vhost-title">
-            <span class="dot online"></span>
-            <h4>{host.server_name}</h4>
-          </div>
-          <div class="header-actions">
-            <span class="badge ssl-badge {host.ssl !== 'Disabled' ? 'ssl-active' : 'ssl-disabled'}">
-              🔒 {host.ssl}
-            </span>
-            <button on:click={() => openEditModal(i)} class="action-btn edit-btn" title="Edit Host">✏️</button>
-            <button on:click={() => handleDeleteVhost(i)} class="action-btn delete-btn" title="Delete Host">🗑️</button>
-          </div>
-        </div>
-
-        <div class="vhost-details">
-          <div class="detail-row">
-            <span class="label">Upstream Proxy:</span>
-            <span class="val font-mono">{host.upstream}</span>
-          </div>
-          <div class="detail-row">
-            <span class="label">Max Body Size:</span>
-            <span class="val font-mono">{host.max_body}</span>
-          </div>
-          <div class="detail-row">
-            <span class="label">Rate Limiter:</span>
-            <span class="val">{host.rate_limit}</span>
-          </div>
-          
-          <div class="rules-section">
-            <span class="label">Enabled Rules:</span>
-            <div class="rules-tags">
-              {#each host.rules as rule}
-                <span class="rule-tag font-mono">{rule}</span>
-              {:else}
-                <span class="val text-muted">All rules disabled</span>
-              {/each}
-            </div>
-          </div>
-
-          <div class="geoblock-section">
-            <span class="label">Geoblocking ({host.geoblock_type}):</span>
-            <div class="blocked-countries-tags">
-              {#each host.blocked_countries as code}
-                <span class="country-tag {host.geoblock_type === 'Allowlist' ? 'allowlist-tag' : 'blocklist-tag'}">{flags[code] || '🌐'} {code}</span>
-              {:else}
-                {#if host.geoblock_type === 'Allowlist'}
-                  <span class="val text-muted font-bold" style="color: var(--color-critical)">Lockdown (Block All Countries)</span>
-                {:else}
-                  <span class="val text-muted font-bold" style="color: var(--color-pass)">None (Open Access)</span>
-                {/if}
-              {/each}
-            </div>
-          </div>
-        </div>
-      </div>
-    {/each}
-  </div>
-
-  <!-- Modal Form Overlay -->
-  {#if showModal}
-    <div class="modal-overlay">
-      <div class="modal-content card">
-        <h3 class="modal-title">{isEditing ? 'Edit Virtual Host' : 'Create Virtual Host'}</h3>
-        
-        <div class="form-grid">
-          <div class="form-group">
-            <label for="server_name">Server Name (Domain / Wildcard)</label>
-            <input 
-              id="server_name"
-              type="text" 
-              placeholder="e.g. *.domainsaya.my.id" 
-              bind:value={newServerName}
-              class="input-field"
-            />
-          </div>
-
-          <div class="form-group">
-            <label for="upstream">Upstream Backend Port</label>
-            <input 
-              id="upstream"
-              type="text" 
-              placeholder="e.g. 127.0.0.1:8080" 
-              bind:value={newUpstream}
-              class="input-field"
-            />
-          </div>
-
-          <div class="form-group">
-            <label for="ssl">SSL Encryption Mode</label>
-            <select id="ssl" bind:value={newSsl} class="input-field select-input">
-              <option value="Auto (Local CA)">Auto (Local CA)</option>
-              <option value="Manual Cert">Manual Certificate</option>
-              <option value="Disabled">Disabled (HTTP Only)</option>
-            </select>
-          </div>
-
-          <div class="form-group">
-            <label for="max_body">Max Request Body Size</label>
-            <input 
-              id="max_body"
-              type="text" 
-              placeholder="e.g. 10MB" 
-              bind:value={newMaxBody}
-              class="input-field"
-            />
-          </div>
-
-          <div class="form-group font-span-2">
-            <label for="rate_limit">Rate Limiter Threshold</label>
-            <input 
-              id="rate_limit"
-              type="text" 
-              placeholder="e.g. 600 req/min" 
-              bind:value={newRateLimit}
-              class="input-field"
-            />
-          </div>
-
-          <!-- Batching Checkbox Selector for rules -->
-          <div class="form-group font-span-2">
-            <span class="form-section-label">Enable WAF Rule Modules (Batching Mode)</span>
-            <div class="rules-checkbox-grid">
-              <label class="checkbox-label-vhost">
-                <input type="checkbox" bind:checked={selectedCategories.sqli} />
-                <span>SQL Injection (SQLI-*)</span>
-              </label>
-              <label class="checkbox-label-vhost">
-                <input type="checkbox" bind:checked={selectedCategories.xss} />
-                <span>Cross-Site Scripting (XSS-*)</span>
-              </label>
-              <label class="checkbox-label-vhost">
-                <input type="checkbox" bind:checked={selectedCategories.lfi} />
-                <span>File Inclusion (LFI-* / RFI-*)</span>
-              </label>
-              <label class="checkbox-label-vhost">
-                <input type="checkbox" bind:checked={selectedCategories.cmdi} />
-                <span>Command Injection (CMDI-*)</span>
-              </label>
-              <label class="checkbox-label-vhost">
-                <input type="checkbox" bind:checked={selectedCategories.ssrf} />
-                <span>Request Forgery (SSRF-*)</span>
-              </label>
-              <label class="checkbox-label-vhost">
-                <input type="checkbox" bind:checked={selectedCategories.bot} />
-                <span>Bots & Scanners (BOT-*)</span>
-              </label>
-            </div>
-          </div>
-
-          <!-- Geoblocking Strategy Selection -->
-          <div class="form-group font-span-2">
-            <label for="geoblock_type">Geoblocking Strategy</label>
-            <select id="geoblock_type" bind:value={geoblockType} class="input-field select-input">
-              <option value="Blocklist">Blocklist (Block selected countries, allow all others)</option>
-              <option value="Allowlist">Allowlist (Allow ONLY selected countries, block all others)</option>
-            </select>
-          </div>
-
-          <!-- Geoblocking Checkboxes -->
-          <div class="form-group font-span-2">
-            <span class="form-section-label">Geoblocking Countries ({geoblockType === 'Allowlist' ? 'Allow List' : 'Block List'})</span>
-            <div class="countries-checkbox-grid">
-              {#each availableCountries as country}
-                <label class="checkbox-label-vhost">
-                  <input
-                    type="checkbox"
-                    value={country.code}
-                    checked={blockedCountries.includes(country.code)}
-                    on:change={(e) => toggleCountry(country.code, (e.target as HTMLInputElement).checked)}
-                  />
-                  <span>{country.flag} {country.name}</span>
-                </label>
-              {/each}
-            </div>
-          </div>
-        </div>
-
-        <div class="modal-actions">
-          <button on:click={() => showModal = false} class="btn btn-secondary">Cancel</button>
-          <button on:click={handleSaveVhost} class="btn btn-primary font-bold">
-            {isEditing ? 'Save Changes' : 'Create Host'}
-          </button>
-        </div>
-      </div>
+<!-- Main Header -->
+<div class="flex justify-between items-end mb-lg">
+  <div>
+    <div class="flex items-center gap-2 text-on-surface-variant text-xs mb-1">
+      <span>Aegis WAF</span>
+      <span class="material-symbols-outlined text-[12px]">chevron_right</span>
+      <span>Configuration</span>
+      <span class="material-symbols-outlined text-[12px]">chevron_right</span>
+      <span class="text-primary">VHost Settings</span>
     </div>
-  {/if}
+    <h2 class="font-headline-md text-headline-md text-on-surface mb-xs">VHost Configuration</h2>
+    <p class="text-on-surface-variant font-body-sm opacity-70">Manage virtual host routing, SSL, and protection parameters for backend groups.</p>
+  </div>
+  <div class="flex gap-md">
+    <div class="flex items-center gap-sm px-md py-sm bg-surface-container-low border border-outline-variant rounded">
+      <span class="material-symbols-outlined text-on-surface-variant text-[20px]">search</span>
+      <input 
+        class="bg-transparent border-none focus:ring-0 text-sm p-0 text-on-surface placeholder:text-outline w-48 outline-none" 
+        placeholder="Filter VHosts..." 
+        type="text"
+        bind:value={searchQuery}
+      />
+    </div>
+    <button 
+      on:click={openCreateModal}
+      class="px-lg py-sm bg-primary text-background font-bold text-sm rounded flex items-center gap-2 active:scale-95 transition-all cursor-pointer border-none"
+    >
+      <span class="material-symbols-outlined text-[18px]">add</span>
+      Create VHost
+    </button>
+  </div>
 </div>
 
+<!-- SSL Health Banner -->
+{#if vhosts.some(h => h.ssl !== 'Disabled' && h.ssl.includes('Expired'))}
+  <div class="glass-panel rounded-xl p-md mb-lg flex items-center justify-between border-l-4 border-l-error bg-error/5">
+    <div class="flex items-center gap-md">
+      <span class="material-symbols-outlined text-error">warning</span>
+      <div>
+        <p class="font-bold text-sm text-error">SSL Certificate Attention Required</p>
+        <p class="text-xs text-on-surface-variant">Expired or invalid certificates detected in active routing endpoints.</p>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Management Table -->
+<div class="glass-panel rounded-xl overflow-hidden shadow-2xl">
+  <div class="overflow-x-auto">
+    <table class="w-full text-left border-collapse">
+      <thead>
+        <tr class="bg-surface-container border-b border-outline-variant">
+          <th class="p-md text-xs font-bold text-outline tracking-wider uppercase w-12 text-center"></th>
+          <th class="p-md text-xs font-bold text-outline tracking-wider uppercase">Hostname</th>
+          <th class="p-md text-xs font-bold text-outline tracking-wider uppercase">Backend Proxy</th>
+          <th class="p-md text-xs font-bold text-outline tracking-wider uppercase">SSL Status</th>
+          <th class="p-md text-xs font-bold text-outline tracking-wider uppercase">Max Request Body</th>
+          <th class="p-md text-xs font-bold text-outline tracking-wider uppercase">Security Profile</th>
+          <th class="p-md text-xs font-bold text-outline tracking-wider uppercase text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="font-body-sm">
+        {#each filteredVhosts as host, i}
+          <!-- Standard Row -->
+          <tr 
+            class="border-b border-outline-variant/30 hover:bg-surface-container-high transition-colors group cursor-pointer" 
+            on:click={() => toggleDetails(host.server_name)}
+          >
+            <td class="p-md text-center">
+              <span class="material-symbols-outlined text-outline transition-transform duration-300 inline-block {expandedHosts[host.server_name] ? 'rotate-180 text-primary' : ''}">
+                expand_more
+              </span>
+            </td>
+            <td class="p-md">
+              <div class="flex flex-col">
+                <span class="font-bold text-primary">{host.server_name}</span>
+                <span class="text-[11px] text-outline font-mono">Rate Limit: {host.rate_limit}</span>
+              </div>
+            </td>
+            <td class="p-md">
+              <div class="flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full bg-primary shadow-[0_0_8px_#00d4ff]"></span>
+                <span class="font-mono text-xs">{host.upstream}</span>
+              </div>
+            </td>
+            <td class="p-md">
+              <div class="flex items-center gap-sm">
+                <span class="material-symbols-outlined {host.ssl !== 'Disabled' ? 'text-primary' : 'text-outline'} text-[18px]">
+                  {host.ssl !== 'Disabled' ? 'verified_user' : 'no_encryption'}
+                </span>
+                <span class="text-xs text-on-surface">{host.ssl}</span>
+              </div>
+            </td>
+            <td class="p-md">
+              <span class="font-mono text-xs">{host.max_body}</span>
+            </td>
+            <td class="p-md">
+              <div class="flex flex-wrap gap-1">
+                {#each host.rules as rule}
+                  <span class="px-1.5 py-0.5 bg-primary/10 border border-primary/20 text-primary text-[10px] font-bold rounded font-mono">
+                    {rule.replace('-*', '')}
+                  </span>
+                {/each}
+                {#if host.blocked_countries.length > 0}
+                  <span class="px-1.5 py-0.5 bg-error/10 border border-error/20 text-error text-[10px] font-bold rounded font-mono">
+                    {host.geoblock_type === 'Allowlist' ? 'ALLOW' : 'BLOCK'}: {host.blocked_countries.join(',')}
+                  </span>
+                {/if}
+              </div>
+            </td>
+            <td class="p-md text-right">
+              <div class="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                <button 
+                  on:click={(e) => openEditModal(i, e)} 
+                  class="p-1.5 hover:bg-surface-container-highest rounded text-on-surface-variant hover:text-primary cursor-pointer bg-transparent border-none"
+                  title="Edit VHost"
+                >
+                  <span class="material-symbols-outlined text-[18px]">edit</span>
+                </button>
+                <button 
+                  on:click={(e) => duplicateVhost(i, e)}
+                  class="p-1.5 hover:bg-surface-container-highest rounded text-on-surface-variant hover:text-primary cursor-pointer bg-transparent border-none"
+                  title="Duplicate VHost"
+                >
+                  <span class="material-symbols-outlined text-[18px]">content_copy</span>
+                </button>
+                <button 
+                  on:click={(e) => handleDeleteVhost(i, e)} 
+                  class="p-1.5 hover:bg-surface-container-highest rounded text-on-surface-variant hover:text-error cursor-pointer bg-transparent border-none"
+                  title="Delete VHost"
+                >
+                  <span class="material-symbols-outlined text-[18px]">delete</span>
+                </button>
+              </div>
+            </td>
+          </tr>
+
+          <!-- Expanded Row Details -->
+          {#if expandedHosts[host.server_name]}
+            <tr class="bg-surface-container-lowest/50">
+              <td class="p-0" colspan="7">
+                <div class="p-lg grid grid-cols-3 gap-lg border-b border-outline-variant">
+                  <div class="space-y-3">
+                    <p class="text-xs font-bold text-outline uppercase tracking-widest">Routing & Limits</p>
+                    <div class="font-mono text-xs space-y-1.5 text-on-surface-variant">
+                      <div class="flex justify-between border-b border-outline-variant/20 pb-1">
+                        <span>Max Body Size</span> 
+                        <span class="text-primary">{host.max_body}</span>
+                      </div>
+                      <div class="flex justify-between border-b border-outline-variant/20 pb-1">
+                        <span>Rate Limit</span> 
+                        <span class="text-on-surface">{host.rate_limit}</span>
+                      </div>
+                      <div class="flex justify-between pb-1">
+                        <span>Custom Rules Count</span> 
+                        <span class="text-on-surface">{host.custom_rules ? host.custom_rules.length : 0} rules</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="space-y-3">
+                    <p class="text-xs font-bold text-outline uppercase tracking-widest">SSL encryption</p>
+                    <div class="font-mono text-xs space-y-1.5 text-on-surface-variant">
+                      <div class="flex justify-between border-b border-outline-variant/20 pb-1">
+                        <span>SSL Mode</span> 
+                        <span class="text-on-surface">{host.ssl}</span>
+                      </div>
+                      <div class="flex justify-between border-b border-outline-variant/20 pb-1">
+                        <span>Virtual Host Protocol</span> 
+                        <span class="text-on-surface">{host.ssl !== 'Disabled' ? 'HTTPS/TLS' : 'HTTP/Clear'}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="space-y-3">
+                    <p class="text-xs font-bold text-outline uppercase tracking-widest">Geoblocking ({host.geoblock_type})</p>
+                    <div class="flex flex-wrap gap-1.5 mt-2">
+                      {#each host.blocked_countries as countryCode}
+                        <span class="px-2 py-1 bg-surface-container border border-outline-variant rounded text-xs flex items-center gap-1">
+                          <span>{flags[countryCode] || '🌐'}</span>
+                          <span class="font-mono font-bold text-on-surface">{countryCode}</span>
+                        </span>
+                      {:else}
+                        {#if host.geoblock_type === 'Allowlist'}
+                          <span class="text-xs font-bold text-error">Lockdown: Blocks All Traffic</span>
+                        {:else}
+                          <span class="text-xs font-bold text-primary">Open Access: No geoblocks active</span>
+                        {/if}
+                      {/each}
+                    </div>
+                  </div>
+                </div>
+              </td>
+            </tr>
+          {/if}
+        {:else}
+          <tr>
+            <td colspan="7" class="p-lg text-center text-on-surface-variant font-mono">
+              No Virtual Hosts match your search query.
+            </td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+  </div>
+  <!-- Footer counts -->
+  <div class="bg-surface-container p-md flex justify-between items-center border-t border-outline-variant text-xs text-outline">
+    <p>Showing {filteredVhosts.length} of {vhosts.length} virtual hosts</p>
+    <p>SSL Active: {totalCerts} endpoints</p>
+  </div>
+</div>
+
+<!-- Metric Grid Footer (NOC Context) -->
+<div class="grid grid-cols-4 gap-lg mt-lg">
+  <div class="glass-panel p-lg rounded-xl flex items-center justify-between">
+    <div>
+      <p class="text-[10px] font-bold text-outline uppercase tracking-widest mb-1">Total Vhosts</p>
+      <p class="text-metric-lg font-metric-lg text-primary">{vhosts.length}</p>
+    </div>
+    <span class="material-symbols-outlined text-primary/30 text-[32px]">dns</span>
+  </div>
+  <div class="glass-panel p-lg rounded-xl flex items-center justify-between">
+    <div>
+      <p class="text-[10px] font-bold text-outline uppercase tracking-widest mb-1">SSL Protected</p>
+      <p class="text-metric-lg font-metric-lg text-on-surface">{totalCerts}</p>
+    </div>
+    <span class="material-symbols-outlined text-on-surface/30 text-[32px]">verified</span>
+  </div>
+  <div class="glass-panel p-lg rounded-xl flex items-center justify-between border-b-2 border-b-primary">
+    <div>
+      <p class="text-[10px] font-bold text-outline uppercase tracking-widest mb-1">Avg Reliability</p>
+      <p class="text-metric-lg font-metric-lg text-on-surface">100.0<span class="text-sm font-normal">%</span></p>
+    </div>
+    <span class="material-symbols-outlined text-primary/30 text-[32px]">hub</span>
+  </div>
+  <div class="glass-panel p-lg rounded-xl flex items-center justify-between">
+    <div>
+      <p class="text-[10px] font-bold text-outline uppercase tracking-widest mb-1">Geoblocked Vhosts</p>
+      <p class="text-metric-lg font-metric-lg text-error">{vhosts.filter(h => h.blocked_countries.length > 0).length}</p>
+    </div>
+    <span class="material-symbols-outlined text-error/30 text-[32px]">gpp_maybe</span>
+  </div>
+</div>
+
+<!-- Modal Form Overlay -->
+{#if showModal}
+  <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-lg overflow-y-auto">
+    <div class="glass-panel rounded-xl max-w-2xl w-full p-lg shadow-2xl flex flex-col gap-md my-auto border border-outline-variant">
+      <div class="flex justify-between items-center border-b border-outline-variant pb-md">
+        <h3 class="font-headline-md text-headline-md text-on-surface">{isEditing ? 'Edit Virtual Host' : 'Create Virtual Host'}</h3>
+        <button on:click={() => showModal = false} class="text-outline hover:text-primary transition-colors cursor-pointer bg-transparent border-none">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </div>
+      
+      <div class="grid grid-cols-2 gap-md">
+        <div class="flex flex-col gap-1 col-span-2">
+          <label for="server_name" class="text-xs font-bold text-on-surface-variant uppercase tracking-wider">Server Name (Domain / Wildcard)</label>
+          <input 
+            id="server_name"
+            type="text" 
+            placeholder="e.g. example.com or *.example.com" 
+            bind:value={newServerName}
+            class="bg-surface-container-low border border-outline-variant rounded p-sm text-sm outline-none focus:border-primary text-on-surface"
+          />
+        </div>
+
+        <div class="flex flex-col gap-1">
+          <label for="upstream" class="text-xs font-bold text-on-surface-variant uppercase tracking-wider">Upstream Backend Port / Host</label>
+          <input 
+            id="upstream"
+            type="text" 
+            placeholder="e.g. 127.0.0.1:8080" 
+            bind:value={newUpstream}
+            class="bg-surface-container-low border border-outline-variant rounded p-sm text-sm outline-none focus:border-primary text-on-surface font-mono"
+          />
+        </div>
+
+        <div class="flex flex-col gap-1">
+          <label for="ssl" class="text-xs font-bold text-on-surface-variant uppercase tracking-wider">SSL Encryption Mode</label>
+          <select id="ssl" bind:value={newSsl} class="bg-surface-container-low border border-outline-variant rounded p-sm text-sm outline-none focus:border-primary text-on-surface">
+            <option value="Auto (Local CA)">Auto (Local CA)</option>
+            <option value="Manual Cert">Manual Certificate</option>
+            <option value="Disabled">Disabled (HTTP Only)</option>
+          </select>
+        </div>
+
+        <div class="flex flex-col gap-1">
+          <label for="max_body" class="text-xs font-bold text-on-surface-variant uppercase tracking-wider">Max Request Body Size</label>
+          <input 
+            id="max_body"
+            type="text" 
+            placeholder="e.g. 10MB" 
+            bind:value={newMaxBody}
+            class="bg-surface-container-low border border-outline-variant rounded p-sm text-sm outline-none focus:border-primary text-on-surface font-mono"
+          />
+        </div>
+
+        <div class="flex flex-col gap-1">
+          <label for="rate_limit" class="text-xs font-bold text-on-surface-variant uppercase tracking-wider">Rate Limiter Threshold</label>
+          <input 
+            id="rate_limit"
+            type="text" 
+            placeholder="e.g. 600 req/min" 
+            bind:value={newRateLimit}
+            class="bg-surface-container-low border border-outline-variant rounded p-sm text-sm outline-none focus:border-primary text-on-surface font-mono"
+          />
+        </div>
+
+        <!-- WAF Rule modules batch checklist -->
+        <div class="col-span-2 border-t border-outline-variant/30 pt-md mt-sm">
+          <span class="text-xs font-bold text-on-surface-variant uppercase tracking-wider block mb-sm">Enable WAF Rule Modules</span>
+          <div class="grid grid-cols-3 gap-sm">
+            <label class="flex items-center gap-2 cursor-pointer bg-surface-container-low border border-outline-variant rounded p-sm hover:border-primary transition-all text-on-surface">
+              <input type="checkbox" bind:checked={selectedCategories.sqli} class="rounded border-outline-variant text-primary focus:ring-0 cursor-pointer" />
+              <span class="text-xs">SQL Injection</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer bg-surface-container-low border border-outline-variant rounded p-sm hover:border-primary transition-all text-on-surface">
+              <input type="checkbox" bind:checked={selectedCategories.xss} class="rounded border-outline-variant text-primary focus:ring-0 cursor-pointer" />
+              <span class="text-xs">XSS Protection</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer bg-surface-container-low border border-outline-variant rounded p-sm hover:border-primary transition-all text-on-surface">
+              <input type="checkbox" bind:checked={selectedCategories.lfi} class="rounded border-outline-variant text-primary focus:ring-0 cursor-pointer" />
+              <span class="text-xs">Local/Remote File</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer bg-surface-container-low border border-outline-variant rounded p-sm hover:border-primary transition-all text-on-surface">
+              <input type="checkbox" bind:checked={selectedCategories.cmdi} class="rounded border-outline-variant text-primary focus:ring-0 cursor-pointer" />
+              <span class="text-xs">Command Injection</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer bg-surface-container-low border border-outline-variant rounded p-sm hover:border-primary transition-all text-on-surface">
+              <input type="checkbox" bind:checked={selectedCategories.ssrf} class="rounded border-outline-variant text-primary focus:ring-0 cursor-pointer" />
+              <span class="text-xs">SSRF Protection</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer bg-surface-container-low border border-outline-variant rounded p-sm hover:border-primary transition-all text-on-surface">
+              <input type="checkbox" bind:checked={selectedCategories.bot} class="rounded border-outline-variant text-primary focus:ring-0 cursor-pointer" />
+              <span class="text-xs">Bot Scanners</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Geoblocking strategy -->
+        <div class="col-span-2 border-t border-outline-variant/30 pt-md mt-sm flex flex-col gap-3">
+          <div class="flex justify-between items-center">
+            <span class="text-xs font-bold text-on-surface-variant uppercase tracking-wider block">Geoblocking Configuration</span>
+            <div class="flex items-center gap-2 text-on-surface-variant">
+              <span class="text-xs">Strategy:</span>
+              <select bind:value={geoblockType} class="bg-surface-container border border-outline-variant rounded px-2 py-0.5 text-xs outline-none focus:border-primary text-on-surface font-bold">
+                <option value="Blocklist">Blocklist (Block selected, allow others)</option>
+                <option value="Allowlist">Allowlist (Allow selected, block others)</option>
+              </select>
+            </div>
+          </div>
+          
+          <div class="grid grid-cols-4 gap-sm">
+            {#each availableCountries as country}
+              <label class="flex items-center gap-2 cursor-pointer bg-surface-container-low border border-outline-variant rounded p-sm hover:border-primary transition-all text-on-surface">
+                <input
+                  type="checkbox"
+                  value={country.code}
+                  checked={blockedCountries.includes(country.code)}
+                  on:change={(e) => toggleCountry(country.code, (e.target as HTMLInputElement).checked)}
+                  class="rounded border-outline-variant text-primary focus:ring-0 cursor-pointer"
+                />
+                <span class="text-xs flex items-center gap-1">
+                  <span>{country.flag}</span>
+                  <span>{country.name}</span>
+                </span>
+              </label>
+            {/each}
+          </div>
+        </div>
+      </div>
+
+      <div class="flex justify-end gap-md border-t border-outline-variant pt-md mt-md">
+        <button 
+          on:click={() => showModal = false} 
+          class="px-lg py-sm bg-surface-container border border-outline-variant hover:bg-surface-container-high rounded text-sm text-on-surface transition-colors cursor-pointer"
+        >
+          Cancel
+        </button>
+        <button 
+          on:click={handleSaveVhost} 
+          class="px-lg py-sm bg-primary text-background font-bold rounded text-sm hover:brightness-110 active:scale-95 transition-all cursor-pointer border-none"
+        >
+          {isEditing ? 'Save Changes' : 'Create Host'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
-  .panel-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 1.5rem;
-  }
-
-  .panel-subtitle {
-    font-size: 1rem;
-    font-weight: 600;
-    color: #ffffff;
-  }
-
-  .vhost-cards {
-    display: flex;
-    flex-direction: column;
-    gap: 1.25rem;
-  }
-
-  .vhost-card {
-    padding: 1.25rem 1.5rem;
-  }
-
-  .vhost-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    border-bottom: 1px solid var(--border-card);
-    padding-bottom: 0.75rem;
-    margin-bottom: 1rem;
-  }
-
-  .vhost-title {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-
-  .vhost-title h4 {
-    font-size: 1.1rem;
-    font-weight: 600;
-    color: white;
-  }
-
-  .header-actions {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-
-  .action-btn {
-    background: transparent;
-    border: none;
-    cursor: pointer;
-    font-size: 0.95rem;
-    padding: 0.2rem;
-    border-radius: 4px;
-    transition: all 0.2s;
-    user-select: none;
-  }
-
-  .action-btn:hover {
-    background: rgba(255, 255, 255, 0.05);
-  }
-
-  .delete-btn:hover {
-    color: var(--color-critical);
-    filter: drop-shadow(0 0 4px rgba(244, 63, 94, 0.5));
-  }
-
-  .ssl-badge {
-    font-size: 0.75rem;
-    margin-right: 0.25rem;
-  }
-
-  .ssl-active {
-    background-color: rgba(16, 185, 129, 0.1);
-    color: var(--color-pass);
-  }
-
-  .ssl-disabled {
-    background-color: rgba(244, 63, 94, 0.1);
-    color: var(--color-critical);
-  }
-
-  .vhost-details {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 1rem;
-  }
-
-  .detail-row {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-  }
-
-  .label {
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-
-  .val {
-    font-size: 0.85rem;
-    color: var(--text-main);
-  }
-
-  .rules-section, .geoblock-section {
-    grid-column: span 3;
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    margin-top: 0.5rem;
-    border-top: 1px dashed rgba(255, 255, 255, 0.05);
-    padding-top: 0.75rem;
-  }
-
-  .rules-tags {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.4rem;
-  }
-
-  .rule-tag {
-    font-size: 0.75rem;
-    background-color: rgba(255, 255, 255, 0.04);
-    border: 1px solid var(--border-card);
-    padding: 0.15rem 0.5rem;
-    border-radius: 4px;
-    color: var(--text-muted);
-  }
-
-  /* Blocked countries tags */
-  .blocked-countries-tags {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.4rem;
-  }
-
-  .country-tag {
-    font-size: 0.75rem;
-    padding: 0.15rem 0.5rem;
-    border-radius: 4px;
-    font-weight: 600;
-  }
-  
-  .country-tag.blocklist-tag {
-    background-color: rgba(244, 63, 94, 0.15);
-    color: var(--color-critical);
-    border: 1px solid rgba(244, 63, 94, 0.2);
-  }
-
-  .country-tag.allowlist-tag {
-    background-color: rgba(16, 185, 129, 0.15);
-    color: var(--color-pass);
-    border: 1px solid rgba(16, 185, 129, 0.2);
-  }
-
-  /* Modal Styles */
-  .modal-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100vw;
-    height: 100vh;
-    background-color: rgba(5, 5, 8, 0.85);
-    backdrop-filter: blur(8px);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 100;
-  }
-
-  .modal-content {
-    width: 100%;
-    max-width: 580px;
-    padding: 2rem;
-    display: flex;
-    flex-direction: column;
-    gap: 1.5rem;
-    max-height: 90vh;
-    overflow-y: auto;
-  }
-
-  .modal-title {
-    font-size: 1.25rem;
-    font-weight: 700;
-    color: white;
-    letter-spacing: -0.2px;
-    border-bottom: 1px solid var(--border-card);
-    padding-bottom: 0.75rem;
-  }
-
-  .form-grid {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 1rem;
-  }
-
-  .form-group {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-  }
-
-  .form-group.font-span-2 {
-    grid-column: span 2;
-  }
-
-  .form-group label {
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    font-weight: 500;
-  }
-
-  .form-group .input-field {
-    width: 100%;
-  }
-
-  .select-input {
-    background-color: var(--bg-darker);
-  }
-
-  .modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.75rem;
-    border-top: 1px solid var(--border-card);
-    padding-top: 1.25rem;
-  }
-
-  /* Rules Checkbox Grid styling */
-  .rules-checkbox-grid, .countries-checkbox-grid {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 0.75rem;
-    background-color: rgba(0, 0, 0, 0.2);
-    border: 1px solid var(--border-card);
-    padding: 1rem;
-    border-radius: 6px;
-    margin-top: 0.25rem;
-  }
-
-  .form-section-label {
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    font-weight: 500;
-  }
-
-  .checkbox-label-vhost {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    cursor: pointer;
-    font-size: 0.8rem;
-    color: var(--text-main);
-    user-select: none;
-  }
-
-  .checkbox-label-vhost input {
-    cursor: pointer;
-    width: 15px;
-    height: 15px;
-    accent-color: var(--accent-primary);
-  }
-
-  /* Empty State */
-  .empty-state {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    padding: 4rem 2rem;
-    text-align: center;
-    color: var(--text-muted);
-    gap: 0.5rem;
-  }
-
-  .empty-icon {
-    font-size: 2.5rem;
-    margin-bottom: 0.5rem;
-  }
-
-  .empty-state h4 {
-    color: white;
-    font-weight: 600;
+  .glass-panel {
+    background: #0d1117;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-top: 1px solid rgba(255, 255, 255, 0.12);
+    position: relative;
   }
 </style>

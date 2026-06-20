@@ -13,17 +13,33 @@ cleanup() {
 }
 trap cleanup SIGINT SIGTERM
 
-echo "Starting WAF Controller..."
+echo "Step 1: Checking and starting ClickHouse Database..."
+docker compose up -d clickhouse
+if [ $? -ne 0 ]; then
+    echo "[ERROR] Failed to start ClickHouse Docker container. Please make sure Docker service is running!"
+    exit 1
+fi
+
+echo
+echo "Step 2: Waiting 5 seconds for ClickHouse to initialize..."
+sleep 5
+
+# Export ClickHouse credentials for background tasks
+export CLICKHOUSE_USER=default
+export CLICKHOUSE_PASSWORD=aegis
+
+echo
+echo "Step 3: Starting WAF Controller..."
 cargo run -- controller &
 PID_CONTROLLER=$!
 
 sleep 2
 
-echo "Starting WAF Agent (connecting to Controller)..."
+echo "Step 4: Starting WAF Agent (connecting to Controller)..."
 cargo run -- agent --controller http://localhost:8080 &
 PID_AGENT=$!
 
-echo "Starting Dashboard Vite Dev Server..."
+echo "Step 5: Starting Dashboard Vite Dev Server..."
 cd dashboard && npm run dev &
 PID_VITE=$!
 cd ..

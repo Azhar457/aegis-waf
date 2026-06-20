@@ -6,7 +6,6 @@ description = "Pure Layer 7 WAF - Homelab Edition"
 
 [workspace]
 members = [
-    "aegis-ebpf",
     "xtask",
 ]
 
@@ -38,9 +37,9 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 urlencoding = "2.1.3"
 sysinfo = "0.30.12"
 tokio-tungstenite = "0.21.0"
-
-
-
+maxminddb = "0.23"
+htmlescape = "0.3"
+unicode-normalization = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.27", features = ["user"] } # for privilege dropping

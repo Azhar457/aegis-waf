@@ -8,6 +8,7 @@ use hyper_util::client::legacy::Client;
 use std::net::SocketAddr;
 use crate::{AppState, rules::RuleEngine, vhost};
 use std::collections::HashMap;
+use once_cell::sync::Lazy;
 
 pub async fn forward_request(
     state: axum::extract::State<AppState>,
@@ -28,13 +29,21 @@ pub async fn forward_request(
         )
     };
 
-    // Extract real client IP (check X-Forwarded-For first, fallback to TCP peer address)
-    let client_ip = req.headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .and_then(|ip| ip.trim().parse().ok())
-        .unwrap_or_else(|| peer_addr.ip());
+    // Extract real client IP (XFF only trusted from internal/private proxies)
+    let client_ip = {
+        let peer_ip = peer_addr.ip();
+        let is_trusted = crate::is_local_ip(&peer_ip);
+        if is_trusted {
+            req.headers()
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.split(',').last()) // Ambil IP paling kanan (proxied terakhir)
+                .and_then(|ip| ip.trim().parse().ok())
+                .unwrap_or(peer_ip)
+        } else {
+            peer_ip
+        }
+    };
 
     // Extract request data
     let method = req.method().clone();
@@ -250,8 +259,9 @@ pub async fn forward_request(
     }
     let backend_req = backend_req.body(new_body).unwrap();
 
-    match client.request(backend_req).await {
-        Ok(resp) => {
+    let backend_timeout = tokio::time::Duration::from_secs(30);
+    match tokio::time::timeout(backend_timeout, client.request(backend_req)).await {
+        Ok(Ok(resp)) => {
             if log_level == "verbose" || log_level == "all" {
                 let status = resp.status();
                 let entry = crate::logging::WafLogEntry {
@@ -269,7 +279,7 @@ pub async fn forward_request(
             let (parts, body) = resp.into_parts();
             Response::from_parts(parts, Body::new(body))
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             if log_level == "verbose" || log_level == "all" || log_level == "anomaly" || log_level == "errors" {
                 let entry = crate::logging::WafLogEntry {
                     timestamp: chrono::Utc::now().to_rfc3339(),
@@ -284,23 +294,40 @@ pub async fn forward_request(
             }
             (StatusCode::BAD_GATEWAY, format!("Backend error: {}", e)).into_response()
         }
+        Err(_) => {
+            if log_level == "verbose" || log_level == "all" || log_level == "anomaly" || log_level == "errors" {
+                let entry = crate::logging::WafLogEntry {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    client_ip: client_ip.to_string(),
+                    method: method.as_str().to_string(),
+                    path: path_and_query.clone(),
+                    action: "ERROR".to_string(),
+                    rule_id: "SYS-504".to_string(),
+                    reason: "Backend request timed out after 30 seconds".to_string(),
+                };
+                let _ = state.log_tx.try_send(entry);
+            }
+            (StatusCode::GATEWAY_TIMEOUT, "Gateway Timeout: Backend did not respond in time".to_string()).into_response()
+        }
     }
 }
 
-pub fn resolve_ip_country(ip: &std::net::IpAddr) -> &'static str {
-    let ip_str = ip.to_string();
-    if ip_str.starts_with("127.") || ip_str.starts_with("192.168.") || ip_str.starts_with("10.") || ip_str == "::1" || ip_str.starts_with("172.") {
-        return "LOCAL";
+static GEOIP_READER: Lazy<Option<maxminddb::Reader<Vec<u8>>>> = Lazy::new(|| {
+    maxminddb::Reader::open_readfile("GeoLite2-Country.mmdb").ok()
+});
+
+pub fn resolve_ip_country(ip: &std::net::IpAddr) -> String {
+    if crate::is_local_ip(ip) {
+        return "LOCAL".to_string();
     }
     
-    // Simple deterministic hash
-    let mut hash: i32 = 0;
-    for c in ip_str.chars() {
-        let val = c as i32;
-        hash = hash.wrapping_shl(5).wrapping_sub(hash).wrapping_add(val);
+    if let Some(reader) = GEOIP_READER.as_ref() {
+        if let Ok(record) = reader.lookup::<maxminddb::geoip2::Country>(*ip) {
+            if let Some(country) = record.country.and_then(|c| c.iso_code) {
+                return country.to_string();
+            }
+        }
     }
     
-    let countries = ["US", "DE", "RU", "CN", "SG", "ID", "BR", "AU"];
-    let index = (hash.abs() as usize) % countries.len();
-    countries[index]
+    "XX".to_string()
 }

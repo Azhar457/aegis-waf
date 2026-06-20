@@ -30,28 +30,87 @@
   let vhosts: VHost[] = [];
   let selectedVhostIndex = 0;
   
-  // Custom Rules form state
-  let showModal = false;
-  let newRuleId = "";
-  let newRuleName = "";
+  // Custom Rules editor state
+  let ruleName = "";
   let conditionFieldType = "path"; // "path", "query", "body", "header"
   let customHeaderName = "User-Agent";
-  let newOperator = "contains";    // "equals", "contains", "starts_with"
-  let newConditionValue = "";
-  let newAction = "block";         // "block", "redirect"
-  let newRedirectUrl = "";
+  let operator = "contains";    // "equals", "contains", "starts_with"
+  let conditionValue = "";
+  let action = "block";         // "block", "redirect"
+  let redirectUrl = "";
+  let editingRuleId: string | null = null;
 
-  // Preset signatures lists (read-only reference for user)
-  let presets = [
-    { id: "SQLI-001", name: "SQL Injection (Basic)", category: "SQL Injection", severity: "Critical", description: "Classic SQL injection pattern (OR 1=1, UNION SELECT)" },
-    { id: "SQLI-002", name: "SQL Injection (Blind/Time)", category: "SQL Injection", severity: "Critical", description: "Time-based blind SQL injection (SLEEP, WAITFOR)" },
-    { id: "SQLI-003", name: "SQL Injection (Union)", category: "SQL Injection", severity: "Critical", description: "UNION SELECT queries to extract DB schema" },
-    { id: "XSS-001", name: "XSS - Script Tag", category: "Cross-Site Scripting", severity: "High", description: "Injecting script block or external javascript sources" },
-    { id: "XSS-002", name: "XSS - Event Handler", category: "Cross-Site Scripting", severity: "High", description: "HTML event handlers execution (onload, onerror, alert)" },
-    { id: "LFI-001", name: "Local File Inclusion", category: "File Inclusion", severity: "High", description: "Path traversal access (/etc/passwd, ../)" },
-    { id: "RFI-001", name: "Remote File Inclusion", category: "File Inclusion", severity: "Critical", description: "External script execution via URL inclusion" },
-    { id: "BOT-001", name: "Bad User-Agent", category: "Bots & Scanners", severity: "Medium", description: "Known security scanners (sqlmap, nmap, gobuster, wfuzz)" }
+  // Presets info reference
+  let presetGroups = [
+    {
+      key: 'sqli',
+      name: "SQL Injection Protection",
+      rule_pattern: "SQLI-*",
+      icon: "database",
+      severity: "CRITICAL",
+      rules: [
+        { id: "SQLI-001", name: "SQL Injection (Basic)", description: "Classic SQL injection pattern (OR 1=1, UNION SELECT)" },
+        { id: "SQLI-002", name: "SQL Injection (Blind/Time)", description: "Time-based blind SQL injection (SLEEP, WAITFOR)" },
+        { id: "SQLI-003", name: "SQL Injection (Union)", description: "UNION SELECT queries to extract DB schema" }
+      ]
+    },
+    {
+      key: 'xss',
+      name: "Cross-Site Scripting (XSS)",
+      rule_pattern: "XSS-*",
+      icon: "code",
+      severity: "HIGH",
+      rules: [
+        { id: "XSS-001", name: "XSS - Script Tag", description: "Injecting script block or external javascript sources" },
+        { id: "XSS-002", name: "XSS - Event Handler", description: "HTML event handlers execution (onload, onerror, alert)" }
+      ]
+    },
+    {
+      key: 'lfi',
+      name: "File Inclusion Protection",
+      rule_pattern: "LFI-*",
+      icon: "folder_open",
+      severity: "HIGH",
+      rules: [
+        { id: "LFI-001", name: "Local File Inclusion", description: "Path traversal access (/etc/passwd, ../)" },
+        { id: "RFI-001", name: "Remote File Inclusion", description: "External script execution via URL inclusion" }
+      ]
+    },
+    {
+      key: 'cmdi',
+      name: "OS Command Injection",
+      rule_pattern: "CMDI-*",
+      icon: "terminal",
+      severity: "HIGH",
+      rules: [
+        { id: "CMDI-001", name: "Command Exec Pattern", description: "Detect shell character execution (;, |, `, $())" }
+      ]
+    },
+    {
+      key: 'ssrf',
+      name: "Request Forgery Protection",
+      rule_pattern: "SSRF-*",
+      icon: "swap_calls",
+      severity: "MEDIUM",
+      rules: [
+        { id: "SSRF-001", name: "SSRF localhost bypass", description: "Access local network interfaces or metadata endpoints" }
+      ]
+    },
+    {
+      key: 'bot',
+      name: "Bots & Scanners Filter",
+      rule_pattern: "BOT-*",
+      icon: "smart_toy",
+      severity: "MEDIUM",
+      rules: [
+        { id: "BOT-001", name: "Bad User-Agent", description: "Known security scanners (sqlmap, nmap, gobuster, wfuzz)" }
+      ]
+    }
   ];
+
+  // Sandbox simulation state
+  let testPayload = "";
+  let simulationResult: { status: 'idle' | 'testing' | 'triggered' | 'passed', ruleName?: string } = { status: 'idle' };
 
   async function fetchVhosts() {
     try {
@@ -83,50 +142,114 @@
     fetchVhosts();
   });
 
-  function openCreateModal() {
-    newRuleId = "CR-" + Math.floor(100 + Math.random() * 900);
-    newRuleName = "";
-    conditionFieldType = "path";
-    customHeaderName = "User-Agent";
-    newOperator = "contains";
-    newConditionValue = "";
-    newAction = "block";
-    newRedirectUrl = "";
-    showModal = true;
+  // Toggle rule modules
+  async function toggleModule(pattern: string, checked: boolean) {
+    if (vhosts.length === 0) return;
+    const host = vhosts[selectedVhostIndex];
+    let activeRules = [...(host.rules || [])];
+    
+    if (checked) {
+      if (!activeRules.includes(pattern)) {
+        activeRules.push(pattern);
+      }
+      // Specific to LFI: enable RFI as well
+      if (pattern === 'LFI-*' && !activeRules.includes('RFI-*')) {
+        activeRules.push('RFI-*');
+      }
+    } else {
+      activeRules = activeRules.filter(r => r !== pattern);
+      if (pattern === 'LFI-*') {
+        activeRules = activeRules.filter(r => r !== 'RFI-*');
+      }
+    }
+    
+    vhosts[selectedVhostIndex].rules = activeRules;
+    await saveVhosts();
   }
 
-  function handleAddRule() {
-    if (!newRuleName || !newConditionValue) return;
-    if (newAction === 'redirect' && !newRedirectUrl) return;
+  function handleSaveCustomRule() {
+    if (vhosts.length === 0) return;
+    if (!ruleName || !conditionValue) return;
+    if (action === 'redirect' && !redirectUrl) return;
 
     let finalConditionType = conditionFieldType;
     if (conditionFieldType === 'header') {
       finalConditionType = `header:${customHeaderName.trim().toLowerCase()}`;
     }
 
-    const newRule: CustomRule = {
-      id: newRuleId,
-      name: newRuleName,
-      condition_type: finalConditionType,
-      operator: newOperator,
-      condition_value: newConditionValue,
-      action: newAction,
-      action_value: newAction === 'redirect' ? newRedirectUrl : "",
-      enabled: true
-    };
-
-    if (!vhosts[selectedVhostIndex].custom_rules) {
-      vhosts[selectedVhostIndex].custom_rules = [];
+    const currentVhost = vhosts[selectedVhostIndex];
+    if (!currentVhost.custom_rules) {
+      currentVhost.custom_rules = [];
     }
 
-    vhosts[selectedVhostIndex].custom_rules.push(newRule);
-    vhosts = [...vhosts]; // trigger reactivity
+    if (editingRuleId) {
+      // Modify existing
+      currentVhost.custom_rules = currentVhost.custom_rules.map(r => {
+        if (r.id === editingRuleId) {
+          return {
+            ...r,
+            name: ruleName,
+            condition_type: finalConditionType,
+            operator: operator,
+            condition_value: conditionValue,
+            action: action,
+            action_value: action === 'redirect' ? redirectUrl : ""
+          };
+        }
+        return r;
+      });
+    } else {
+      // Create new
+      const newRule: CustomRule = {
+        id: "CR-" + Math.floor(100 + Math.random() * 900),
+        name: ruleName,
+        condition_type: finalConditionType,
+        operator: operator,
+        condition_value: conditionValue,
+        action: action,
+        action_value: action === 'redirect' ? redirectUrl : "",
+        enabled: true
+      };
+      currentVhost.custom_rules.push(newRule);
+    }
 
+    vhosts = [...vhosts];
     saveVhosts();
-    showModal = false;
+
+    // Reset Form
+    cancelEdit();
   }
 
-  function toggleCustomRule(ruleId: string) {
+  function editRule(rule: CustomRule) {
+    editingRuleId = rule.id;
+    ruleName = rule.name;
+    
+    if (rule.condition_type.startsWith('header:')) {
+      conditionFieldType = 'header';
+      customHeaderName = rule.condition_type.replace('header:', '');
+    } else {
+      conditionFieldType = rule.condition_type;
+    }
+    
+    operator = rule.operator;
+    conditionValue = rule.condition_value;
+    action = rule.action;
+    redirectUrl = rule.action_value;
+  }
+
+  function cancelEdit() {
+    editingRuleId = null;
+    ruleName = "";
+    conditionFieldType = "path";
+    customHeaderName = "User-Agent";
+    operator = "contains";
+    conditionValue = "";
+    action = "block";
+    redirectUrl = "";
+  }
+
+  async function toggleCustomRule(ruleId: string) {
+    if (vhosts.length === 0) return;
     vhosts[selectedVhostIndex].custom_rules = vhosts[selectedVhostIndex].custom_rules.map(r => {
       if (r.id === ruleId) {
         return { ...r, enabled: !r.enabled };
@@ -134,14 +257,14 @@
       return r;
     });
     vhosts = [...vhosts];
-    saveVhosts();
+    await saveVhosts();
   }
 
-  function deleteCustomRule(ruleId: string) {
+  async function deleteCustomRule(ruleId: string) {
     if (!confirm("Are you sure you want to delete this custom rule?")) return;
     vhosts[selectedVhostIndex].custom_rules = vhosts[selectedVhostIndex].custom_rules.filter(r => r.id !== ruleId);
     vhosts = [...vhosts];
-    saveVhosts();
+    await saveVhosts();
   }
 
   function displayCondition(rule: CustomRule): string {
@@ -159,77 +282,204 @@
 
     return `${field} ${op} "${rule.condition_value}"`;
   }
+
+  // Sandbox simulation test
+  function runSimulation() {
+    if (!testPayload) return;
+    simulationResult = { status: 'testing' };
+
+    setTimeout(() => {
+      const payloadLower = testPayload.toLowerCase();
+      
+      // Test default modules
+      const host = vhosts[selectedVhostIndex];
+      const activeRules = host ? (host.rules || []) : [];
+
+      if (activeRules.includes("SQLI-*") && (payloadLower.includes("union select") || payloadLower.includes("select ") || payloadLower.includes("or 1=1"))) {
+        simulationResult = { status: 'triggered', ruleName: 'SQL Injection Module (SQLI-*)' };
+        return;
+      }
+
+      if (activeRules.includes("XSS-*") && (payloadLower.includes("<script") || payloadLower.includes("javascript:") || payloadLower.includes("onload="))) {
+        simulationResult = { status: 'triggered', ruleName: 'Cross-Site Scripting Module (XSS-*)' };
+        return;
+      }
+
+      if (activeRules.includes("LFI-*") && (payloadLower.includes("../") || payloadLower.includes("etc/passwd") || payloadLower.includes("boot.ini"))) {
+        simulationResult = { status: 'triggered', ruleName: 'File Inclusion Module (LFI-*)' };
+        return;
+      }
+
+      if (activeRules.includes("CMDI-*") && (payloadLower.includes("; rm ") || payloadLower.includes("&& wget") || payloadLower.includes("curl "))) {
+        simulationResult = { status: 'triggered', ruleName: 'OS Command Injection Module (CMDI-*)' };
+        return;
+      }
+
+      // Test custom rules
+      const activeCustomRules = host ? (host.custom_rules || []).filter(r => r.enabled) : [];
+      for (const rule of activeCustomRules) {
+        let isMatch = false;
+        const val = payloadLower;
+        const matchVal = rule.condition_value.toLowerCase();
+        
+        if (rule.operator === 'equals') {
+          isMatch = (val === matchVal);
+        } else if (rule.operator === 'starts_with') {
+          isMatch = val.startsWith(matchVal);
+        } else {
+          isMatch = val.includes(matchVal);
+        }
+
+        if (isMatch) {
+          simulationResult = { status: 'triggered', ruleName: `Custom Rule [${rule.name}]` };
+          return;
+        }
+      }
+
+      simulationResult = { status: 'passed' };
+    }, 800);
+  }
 </script>
 
-<div class="rule-panel">
-  <!-- Virtual Host Selector -->
-  <div class="vhost-selector-bar card">
-    <span class="selector-txt font-bold">Manage Rules for Domain:</span>
+<!-- Domain Selection Bar -->
+<div class="glass-panel p-md rounded-xl flex items-center justify-between border border-outline-variant mb-lg bg-surface-container-low/50">
+  <div class="flex items-center gap-md">
+    <span class="material-symbols-outlined text-primary">dns</span>
+    <span class="text-xs font-bold text-outline uppercase tracking-wider">Select virtual host:</span>
     {#if vhosts.length > 0}
-      <select bind:value={selectedVhostIndex} class="input-field select-vhost font-bold">
+      <select bind:value={selectedVhostIndex} class="bg-surface-container border border-outline-variant rounded px-sm py-1 text-sm outline-none focus:border-primary text-primary font-bold cursor-pointer">
         {#each vhosts as host, index}
           <option value={index}>{host.hosts[0]} ({host.name})</option>
         {/each}
       </select>
     {:else}
-      <span class="text-muted font-mono">No virtual hosts available</span>
+      <span class="text-xs font-mono text-error">No virtual hosts available</span>
     {/if}
   </div>
+</div>
 
-  <!-- Main section Grid: Custom Rules and Preset signatures -->
-  <div class="rules-grid">
+<div class="flex flex-col lg:flex-row gap-lg h-[calc(100vh-210px)] overflow-hidden">
+  <!-- Left panel: Rule Lists & Toggles -->
+  <div class="flex-grow flex flex-col gap-lg overflow-y-auto no-scrollbar pr-xs">
+    <!-- Title -->
+    <div>
+      <h2 class="font-headline-md text-headline-md text-on-surface">Active Policy Engine</h2>
+      <p class="text-on-surface-variant font-body-sm text-body-sm">Configure preset protection modules and user-defined custom logic rules.</p>
+    </div>
+
+    <!-- Preset Modules Grid -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-md">
+      {#each presetGroups as group}
+        {@const hostRules = vhosts[selectedVhostIndex] ? (vhosts[selectedVhostIndex].rules || []) : []}
+        {@const isEnabled = hostRules.includes(group.rule_pattern)}
+        <div class="glass-card rounded-xl p-md border border-outline-variant/60 relative overflow-hidden flex flex-col gap-sm">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-sm">
+              <span class="material-symbols-outlined text-primary text-xl">{group.icon}</span>
+              <div>
+                <h4 class="font-bold text-sm text-on-surface">{group.name}</h4>
+                <p class="text-[11px] text-on-surface-variant">{group.rules.length} static signatures active</p>
+              </div>
+            </div>
+            
+            <div class="flex items-center gap-2">
+              <span class="text-[9px] font-mono px-1.5 py-0.5 rounded border {group.severity === 'CRITICAL' ? 'bg-error/10 text-error border-error/20' : group.severity === 'HIGH' ? 'bg-tertiary-container/10 text-tertiary-container border-tertiary-container/20' : 'bg-on-surface-variant/10 text-on-surface-variant border-on-surface-variant/20'}">
+                {group.severity}
+              </span>
+              <label class="relative inline-flex items-center cursor-pointer">
+                <input 
+                  type="checkbox" 
+                  checked={isEnabled} 
+                  on:change={(e) => toggleModule(group.rule_pattern, e.currentTarget.checked)}
+                  class="sr-only peer"
+                />
+                <div class="w-9 h-5 bg-surface-container-highest rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary"></div>
+              </label>
+            </div>
+          </div>
+
+          <div class="space-y-1 pl-6 pt-1 border-t border-outline-variant/20">
+            {#each group.rules as r}
+              <div class="flex items-baseline justify-between text-xs py-0.5">
+                <span class="font-mono text-primary text-[10px] bg-primary/5 px-1 rounded border border-primary/10">{r.id}</span>
+                <span class="text-on-surface-variant text-[11px] flex-1 ml-sm truncate" title={r.description}>{r.name}</span>
+                <span class="text-[10px] text-outline">BLOCK</span>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/each}
+    </div>
+
     <!-- Custom Rules Section -->
-    <div class="custom-rules-area">
-      <div class="area-header">
-        <h3 class="panel-subtitle">Custom Enforcements (Conditions & Actions)</h3>
-        {#if vhosts.length > 0}
-          <button on:click={openCreateModal} class="btn btn-primary btn-sm">+ Add Custom Rule</button>
-        {/if}
+    <div class="glass-card rounded-xl p-md border border-outline-variant/60 flex flex-col gap-sm">
+      <div class="flex justify-between items-center pb-xs border-b border-outline-variant/30">
+        <div class="flex items-center gap-sm">
+          <span class="material-symbols-outlined text-primary">edit_note</span>
+          <h3 class="font-bold text-sm text-on-surface">Custom Request Filters</h3>
+        </div>
+        <button 
+          on:click={cancelEdit}
+          class="text-xs px-2 py-1 bg-surface-container border border-outline-variant rounded hover:bg-surface-container-high transition-all cursor-pointer font-bold border-none text-on-surface"
+        >
+          Reset Builder
+        </button>
       </div>
 
-      <div class="table-card card">
-        <table class="rules-table">
+      <div class="overflow-x-auto">
+        <table class="w-full text-left border-collapse text-xs">
           <thead>
-            <tr>
-              <th style="width: 100px;">ID</th>
-              <th>Rule Name</th>
-              <th>Condition Match</th>
-              <th style="width: 100px;">Action</th>
-              <th style="width: 80px; text-align: center;">Active</th>
-              <th style="width: 80px; text-align: center;">Delete</th>
+            <tr class="border-b border-outline-variant">
+              <th class="py-sm px-md text-outline font-bold uppercase tracking-wider">ID</th>
+              <th class="py-sm px-md text-outline font-bold uppercase tracking-wider">Rule Name</th>
+              <th class="py-sm px-md text-outline font-bold uppercase tracking-wider">Condition Match</th>
+              <th class="py-sm px-md text-outline font-bold uppercase tracking-wider">Action</th>
+              <th class="py-sm px-md text-outline font-bold uppercase tracking-wider text-center">Active</th>
+              <th class="py-sm px-md text-outline font-bold uppercase tracking-wider text-right">Options</th>
             </tr>
           </thead>
           <tbody>
             {#if vhosts[selectedVhostIndex] && vhosts[selectedVhostIndex].custom_rules && vhosts[selectedVhostIndex].custom_rules.length > 0}
               {#each vhosts[selectedVhostIndex].custom_rules as rule}
-                <tr class={!rule.enabled ? 'rule-disabled' : ''}>
-                  <td class="font-mono">{rule.id}</td>
-                  <td class="rule-name">{rule.name}</td>
-                  <td class="rule-cond font-mono">{displayCondition(rule)}</td>
-                  <td>
+                <tr class="border-b border-outline-variant/20 hover:bg-surface-container-high/30 transition-colors {!rule.enabled ? 'opacity-50' : ''}">
+                  <td class="py-sm px-md font-mono text-primary font-bold">{rule.id}</td>
+                  <td class="py-sm px-md text-on-surface font-semibold">{rule.name}</td>
+                  <td class="py-sm px-md font-mono text-on-surface-variant">{displayCondition(rule)}</td>
+                  <td class="py-sm px-md">
                     {#if rule.action === 'redirect'}
-                      <span class="action-badge redirect-badge" title={rule.action_value}>↪️ REDIRECT</span>
+                      <span class="px-1.5 py-0.5 bg-primary/10 border border-primary/20 text-primary text-[10px] font-bold rounded uppercase tracking-wider font-mono" title={rule.action_value}>
+                        REDIRECT
+                      </span>
                     {:else}
-                      <span class="action-badge block-badge">🔒 BLOCK (403)</span>
+                      <span class="px-1.5 py-0.5 bg-error/10 border border-error/20 text-error text-[10px] font-bold rounded uppercase tracking-wider font-mono">
+                        BLOCK (403)
+                      </span>
                     {/if}
                   </td>
-                  <td style="text-align: center;">
+                  <td class="py-sm px-md text-center">
                     <input 
                       type="checkbox" 
                       checked={rule.enabled} 
                       on:change={() => toggleCustomRule(rule.id)}
-                      class="toggle-checkbox"
+                      class="rounded border-outline-variant text-primary focus:ring-0 cursor-pointer"
                     />
                   </td>
-                  <td style="text-align: center;">
-                    <button on:click={() => deleteCustomRule(rule.id)} class="delete-icon-btn">🗑️</button>
+                  <td class="py-sm px-md text-right">
+                    <div class="flex justify-end gap-1.5">
+                      <button on:click={() => editRule(rule)} class="text-on-surface-variant hover:text-primary transition-colors cursor-pointer bg-transparent border-none" title="Edit Rule">
+                        <span class="material-symbols-outlined text-[16px]">edit</span>
+                      </button>
+                      <button on:click={() => deleteCustomRule(rule.id)} class="text-on-surface-variant hover:text-error transition-colors cursor-pointer bg-transparent border-none" title="Delete Rule">
+                        <span class="material-symbols-outlined text-[16px]">delete</span>
+                      </button>
+                    </div>
                   </td>
                 </tr>
               {/each}
             {:else}
               <tr>
-                <td colspan="6" class="empty-rules-row font-mono text-muted">
-                  No custom rules defined for this virtual host. Click "+ Add Custom Rule" to build one.
+                <td colspan="6" class="py-lg text-center text-outline font-mono">
+                  No custom rules defined for this host. Use the right panel to define one.
                 </td>
               </tr>
             {/if}
@@ -237,389 +487,186 @@
         </table>
       </div>
     </div>
+  </div>
 
-    <!-- Read-Only Presets Reference -->
-    <div class="preset-rules-area">
-      <div class="area-header">
-        <h3 class="panel-subtitle">Default Rule Modules Reference</h3>
+  <!-- Right panel: Custom Rule Builder & Simulation Sandbox -->
+  <div class="w-full lg:w-[420px] flex-shrink-0 flex flex-col gap-lg overflow-y-auto no-scrollbar">
+    <!-- Rule Editor Panel -->
+    <div class="glass-card rounded-xl border border-outline-variant/60 flex flex-col overflow-hidden">
+      <div class="p-md border-b border-outline-variant flex items-center justify-between bg-surface-container-high/30">
+        <div class="flex items-center gap-sm">
+          <span class="material-symbols-outlined text-primary text-lg">terminal</span>
+          <span class="font-bold text-sm tracking-tight text-on-surface">CUSTOM RULE BUILDER</span>
+        </div>
+        {#if editingRuleId}
+          <span class="text-[10px] font-mono bg-primary/20 text-primary px-1.5 rounded uppercase font-bold">Editing: {editingRuleId}</span>
+        {/if}
       </div>
-      
-      <div class="presets-list">
-        {#each presets as p}
-          <div class="preset-card card">
-            <div class="preset-hdr">
-              <span class="font-mono badge preset-id">{p.id}</span>
-              <strong class="preset-name">{p.name}</strong>
-            </div>
-            <p class="preset-desc text-muted">{p.description}</p>
+
+      <div class="p-md space-y-md flex-1">
+        <div class="flex flex-col gap-1">
+          <label for="rule_name_inp" class="text-[10px] uppercase tracking-widest text-on-surface-variant font-bold">Rule Name / Description</label>
+          <input 
+            id="rule_name_inp" 
+            class="w-full bg-[#040508] border border-outline-variant rounded px-sm py-2 text-sm text-on-surface focus:border-primary outline-none" 
+            type="text" 
+            placeholder="e.g. Block login page scanner"
+            bind:value={ruleName}
+          />
+        </div>
+
+        <div class="grid grid-cols-2 gap-sm">
+          <div class="flex flex-col gap-1">
+            <label for="field_select" class="text-[10px] uppercase tracking-widest text-on-surface-variant font-bold">Target Field</label>
+            <select id="field_select" bind:value={conditionFieldType} class="w-full bg-[#040508] border border-outline-variant rounded px-sm py-2 text-sm outline-none focus:border-primary text-on-surface">
+              <option value="path">URL Path (e.g. /wp-admin)</option>
+              <option value="query">Query Parameter</option>
+              <option value="body">Request Body</option>
+              <option value="header">HTTP Header</option>
+            </select>
           </div>
-        {/each}
+
+          <div class="flex flex-col gap-1">
+            <label for="operator_select" class="text-[10px] uppercase tracking-widest text-on-surface-variant font-bold">Operator</label>
+            <select id="operator_select" bind:value={operator} class="w-full bg-[#040508] border border-outline-variant rounded px-sm py-2 text-sm outline-none focus:border-primary text-on-surface">
+              <option value="contains">Contains substring</option>
+              <option value="equals">Equals exactly</option>
+              <option value="starts_with">Starts with prefix</option>
+            </select>
+          </div>
+        </div>
+
+        {#if conditionFieldType === 'header'}
+          <div class="flex flex-col gap-1">
+            <label for="hdr_name" class="text-[10px] uppercase tracking-widest text-on-surface-variant font-bold">HTTP Header Name</label>
+            <input 
+              id="hdr_name" 
+              class="w-full bg-[#040508] border border-outline-variant rounded px-sm py-2 text-sm text-on-surface focus:border-primary outline-none font-mono" 
+              type="text" 
+              placeholder="e.g. User-Agent or Referer"
+              bind:value={customHeaderName}
+            />
+          </div>
+        {/if}
+
+        <div class="flex flex-col gap-1">
+          <label for="match_val" class="text-[10px] uppercase tracking-widest text-on-surface-variant font-bold">Value to Match</label>
+          <input 
+            id="match_val" 
+            class="w-full bg-[#040508] border border-outline-variant rounded px-sm py-2 text-sm text-on-surface focus:border-primary outline-none font-mono" 
+            type="text" 
+            placeholder="e.g. /wp-admin"
+            bind:value={conditionValue}
+          />
+        </div>
+
+        <div class="grid grid-cols-2 gap-sm border-t border-outline-variant/30 pt-md">
+          <div class="flex flex-col gap-1 col-span-2">
+            <label for="action_sel" class="text-[10px] uppercase tracking-widest text-on-surface-variant font-bold">Enforcement Action</label>
+            <select id="action_sel" bind:value={action} class="w-full bg-[#040508] border border-outline-variant rounded px-sm py-2 text-sm outline-none focus:border-primary text-on-surface font-bold">
+              <option value="block">Block request (Return 403 Forbidden)</option>
+              <option value="redirect">Redirect client (Return 302 Redirect)</option>
+            </select>
+          </div>
+          
+          {#if action === 'redirect'}
+            <div class="flex flex-col gap-1 col-span-2">
+              <label for="redir_url" class="text-[10px] uppercase tracking-widest text-on-surface-variant font-bold">Target Redirect URL</label>
+              <input 
+                id="redir_url" 
+                class="w-full bg-[#040508] border border-outline-variant rounded px-sm py-2 text-sm text-on-surface focus:border-primary outline-none font-mono" 
+                type="text" 
+                placeholder="e.g. http://localhost/blocked"
+                bind:value={redirectUrl}
+              />
+            </div>
+          {/if}
+        </div>
+      </div>
+
+      <div class="p-md bg-surface-container-high/30 border-t border-outline-variant flex items-center justify-between">
+        {#if editingRuleId}
+          <button on:click={cancelEdit} class="text-xs text-outline hover:text-on-surface transition-colors cursor-pointer bg-transparent border-none">Cancel</button>
+        {:else}
+          <span class="text-xs text-on-surface-variant italic font-mono">New Signature</span>
+        {/if}
+        <button 
+          on:click={handleSaveCustomRule}
+          class="bg-primary text-background font-bold px-lg py-2 rounded text-xs transition-transform active:scale-95 shadow-lg shadow-primary/10 cursor-pointer border-none"
+        >
+          {editingRuleId ? 'Apply Updates' : 'Compile & Add Rule'}
+        </button>
+      </div>
+    </div>
+
+    <!-- Simulation Sandbox -->
+    <div class="glass-card rounded-xl p-md border border-outline-variant/60">
+      <div class="flex items-center gap-sm mb-md pb-xs border-b border-outline-variant/30">
+        <span class="material-symbols-outlined text-primary text-md">science</span>
+        <h4 class="font-bold text-sm tracking-tight text-on-surface">SIMULATION SANDBOX</h4>
+      </div>
+      <div class="space-y-md">
+        <p class="text-[11px] text-on-surface-variant">Test payloads or paths against active modules and custom rules instantly:</p>
+        
+        <div class="relative">
+          <textarea 
+            class="w-full bg-[#040508] border border-outline-variant rounded p-sm text-xs font-mono text-on-surface focus:border-primary outline-none h-20 resize-none" 
+            placeholder="Paste malicious payload or URL here (e.g. /wp-admin or ' OR 1=1)..."
+            bind:value={testPayload}
+          ></textarea>
+          <button 
+            on:click={runSimulation}
+            class="absolute bottom-3 right-3 bg-surface-container-highest p-1.5 rounded hover:text-primary transition-colors cursor-pointer text-xs flex items-center gap-1 border-none text-on-surface-variant"
+            title="Execute test"
+          >
+            <span class="material-symbols-outlined text-sm">play_arrow</span>
+            <span>Test</span>
+          </button>
+        </div>
+
+        {#if simulationResult.status === 'testing'}
+          <div class="flex items-center justify-center p-sm rounded bg-surface-container/30 border border-outline-variant">
+            <span class="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin mr-sm"></span>
+            <span class="text-xs font-mono text-outline">Simulating enforcements...</span>
+          </div>
+        {:else}
+          {#if simulationResult.status === 'triggered'}
+            <div class="flex items-center justify-between p-sm rounded bg-error/10 border border-error/20">
+              <div class="flex items-center gap-sm">
+                <span class="material-symbols-outlined text-error text-md">dangerous</span>
+                <span class="text-xs font-bold text-error">DETECTION TRIGGERED</span>
+              </div>
+              <span class="text-[10px] font-mono text-on-surface-variant max-w-[180px] truncate" title={simulationResult.ruleName}>
+                Rule: {simulationResult.ruleName}
+              </span>
+            </div>
+          {:else if simulationResult.status === 'passed'}
+            <div class="flex items-center justify-between p-sm rounded bg-primary/10 border border-primary/20">
+              <div class="flex items-center gap-sm">
+                <span class="material-symbols-outlined text-primary text-md">check_circle</span>
+                <span class="text-xs font-bold text-primary font-mono">REQUEST CLEARED</span>
+              </div>
+              <span class="text-[10px] font-mono text-on-surface-variant">No rules triggered</span>
+            </div>
+          {/if}
+        {/if}
       </div>
     </div>
   </div>
-
-  <!-- Add Custom Rule Modal -->
-  {#if showModal}
-    <div class="modal-overlay">
-      <div class="modal-content card">
-        <h3 class="modal-title">Create Custom Rule Condition</h3>
-        
-        <div class="form-grid">
-          <div class="form-group">
-            <label for="rule_id">Rule Signature ID</label>
-            <input 
-              id="rule_id"
-              type="text" 
-              bind:value={newRuleId}
-              class="input-field font-mono"
-              readonly
-            />
-          </div>
-
-          <div class="form-group">
-            <label for="rule_name">Rule Name / Description</label>
-            <input 
-              id="rule_name"
-              type="text" 
-              placeholder="e.g. Block admin access" 
-              bind:value={newRuleName}
-              class="input-field"
-            />
-          </div>
-
-          <!-- Matching condition fields -->
-          <div class="form-group">
-            <label for="match_field">Check Target Field</label>
-            <select id="match_field" bind:value={conditionFieldType} class="input-field select-input">
-              <option value="path">URL Path (e.g. /wp-admin)</option>
-              <option value="query">Query Parameter (e.g. id=1)</option>
-              <option value="body">Request Body Content</option>
-              <option value="header">HTTP Request Header</option>
-            </select>
-          </div>
-
-          {#if conditionFieldType === 'header'}
-            <div class="form-group">
-              <label for="header_name">HTTP Header Name</label>
-              <input 
-                id="header_name"
-                type="text" 
-                placeholder="e.g. User-Agent or Referer" 
-                bind:value={customHeaderName}
-                class="input-field"
-              />
-            </div>
-          {:else}
-            <div class="form-group">
-              <label for="operator">Operator</label>
-              <select id="operator" bind:value={newOperator} class="input-field select-input">
-                <option value="contains">Contains substring</option>
-                <option value="equals">Equals exactly</option>
-                <option value="starts_with">Starts with prefix</option>
-              </select>
-            </div>
-          {/if}
-
-          {#if conditionFieldType === 'header'}
-            <div class="form-group">
-              <label for="operator_hdr">Operator</label>
-              <select id="operator_hdr" bind:value={newOperator} class="input-field select-input">
-                <option value="contains">Contains substring</option>
-                <option value="equals">Equals exactly</option>
-                <option value="starts_with">Starts with prefix</option>
-              </select>
-            </div>
-          {/if}
-
-          <div class="form-group font-span-2">
-            <label for="match_value">Value to Match</label>
-            <input 
-              id="match_value"
-              type="text" 
-              placeholder="e.g. /wp-admin or bad_bot" 
-              bind:value={newConditionValue}
-              class="input-field"
-            />
-          </div>
-
-          <!-- Action Fields -->
-          <div class="form-group {newAction === 'redirect' ? '' : 'font-span-2'}">
-            <label for="action_select">Rule Action</label>
-            <select id="action_select" bind:value={newAction} class="input-field select-input">
-              <option value="block">Block (Return 403 Forbidden)</option>
-              <option value="redirect">Redirect (Return 302 Temporary Redirect)</option>
-            </select>
-          </div>
-
-          {#if newAction === 'redirect'}
-            <div class="form-group">
-              <label for="redirect_url">Redirect Target URL</label>
-              <input 
-                id="redirect_url"
-                type="text" 
-                placeholder="e.g. http://localhost/blocked.html" 
-                bind:value={newRedirectUrl}
-                class="input-field"
-              />
-            </div>
-          {/if}
-        </div>
-
-        <div class="modal-actions">
-          <button on:click={() => showModal = false} class="btn btn-secondary">Cancel</button>
-          <button on:click={handleAddRule} class="btn btn-primary font-bold">Add Custom Rule</button>
-        </div>
-      </div>
-    </div>
-  {/if}
 </div>
 
 <style>
-  .vhost-selector-bar {
-    display: flex;
-    align-items: center;
-    gap: 1.5rem;
-    padding: 0.8rem 1.25rem;
-    background-color: var(--bg-card);
-    border: 1px solid var(--border-card);
-    margin-bottom: 1.5rem;
+  .glass-card {
+    background: rgba(13, 17, 23, 0.7);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-top: 1px solid rgba(255, 255, 255, 0.15);
   }
 
-  .selector-txt {
-    font-size: 0.9rem;
-    color: var(--text-muted);
-  }
-
-  .select-vhost {
-    background-color: var(--bg-darker);
-    padding: 0.4rem 1rem;
-    font-size: 0.9rem;
-    color: white;
-    min-width: 250px;
-    border: 1px solid var(--border-card);
-  }
-
-  .rules-grid {
-    display: grid;
-    grid-template-columns: 2.2fr 1fr;
-    gap: 1.5rem;
-  }
-
-  .area-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 1rem;
-  }
-
-  .panel-subtitle {
-    font-size: 1rem;
-    font-weight: 700;
-    color: #ffffff;
-    margin: 0;
-  }
-
-  .table-card {
-    padding: 0;
-    overflow: hidden;
-  }
-
-  .rules-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.85rem;
-    text-align: left;
-  }
-
-  .rules-table th {
-    background-color: rgba(0, 0, 0, 0.25);
-    border-bottom: 1px solid var(--border-card);
-    padding: 0.85rem 1rem;
-    color: var(--text-muted);
-    font-weight: 600;
-    text-transform: uppercase;
-    font-size: 0.72rem;
-    letter-spacing: 0.5px;
-  }
-
-  .rules-table td {
-    padding: 0.85rem 1rem;
-    border-bottom: 1px solid var(--border-card);
-  }
-
-  .rules-table tr:last-child td {
-    border-bottom: none;
-  }
-
-  .rules-table tr:hover {
-    background-color: rgba(255, 255, 255, 0.015);
-  }
-
-  .rule-name {
-    font-weight: 600;
-    color: white;
-  }
-
-  .rule-cond {
-    color: var(--text-muted);
-    font-size: 0.8rem;
-  }
-
-  .action-badge {
-    font-size: 0.75rem;
-    padding: 0.15rem 0.4rem;
-    border-radius: 4px;
-    font-weight: 700;
-  }
-
-  .block-badge {
-    background-color: rgba(244, 63, 94, 0.15);
-    color: var(--color-critical);
-    border: 1px solid rgba(244, 63, 94, 0.2);
-  }
-
-  .redirect-badge {
-    background-color: rgba(59, 130, 246, 0.15);
-    color: #3b82f6;
-    border: 1px solid rgba(59, 130, 246, 0.2);
-  }
-
-  .rule-disabled {
-    opacity: 0.4;
-  }
-
-  .toggle-checkbox {
-    cursor: pointer;
-    width: 15px;
-    height: 15px;
-    accent-color: var(--accent-primary);
-  }
-
-  .delete-icon-btn {
-    background: transparent;
-    border: none;
-    cursor: pointer;
-    font-size: 0.95rem;
-    opacity: 0.6;
-    transition: all 0.2s;
-  }
-
-  .delete-icon-btn:hover {
-    opacity: 1;
-    color: var(--color-critical);
-  }
-
-  .empty-rules-row {
-    text-align: center;
-    padding: 3rem 1rem;
-  }
-
-  /* Preset signatures styling */
-  .presets-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-  }
-
-  .preset-card {
-    padding: 0.85rem 1.25rem;
-    background-color: rgba(255, 255, 255, 0.01);
-  }
-
-  .preset-hdr {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 0.25rem;
-  }
-
-  .preset-id {
-    font-size: 0.7rem;
-    background-color: rgba(255,255,255,0.05);
-    border: 1px solid var(--border-card);
-    color: white;
-  }
-
-  .preset-name {
-    font-size: 0.85rem;
-    color: white;
-  }
-
-  .preset-desc {
-    font-size: 0.75rem;
-    margin: 0;
-  }
-
-  /* Modal Overlay */
-  .modal-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100vw;
-    height: 100vh;
-    background-color: rgba(5, 5, 8, 0.85);
-    backdrop-filter: blur(8px);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 100;
-  }
-
-  .modal-content {
-    width: 100%;
-    max-width: 550px;
-    padding: 2rem;
-    display: flex;
-    flex-direction: column;
-    gap: 1.5rem;
-  }
-
-  .modal-title {
-    font-size: 1.25rem;
-    font-weight: 700;
-    color: white;
-    letter-spacing: -0.2px;
-    border-bottom: 1px solid var(--border-card);
-    padding-bottom: 0.75rem;
-  }
-
-  .form-grid {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 1rem;
-  }
-
-  .form-group {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-  }
-
-  .form-group.font-span-2 {
-    grid-column: span 2;
-  }
-
-  .form-group label {
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    font-weight: 500;
-  }
-
-  .form-group .input-field {
-    width: 100%;
-  }
-
-  .select-input {
-    background-color: var(--bg-darker);
-  }
-
-  .modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.75rem;
-    border-top: 1px solid var(--border-card);
-    padding-top: 1.25rem;
+  .glass-panel {
+    background: #0d1117;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-top: 1px solid rgba(255, 255, 255, 0.12);
+    position: relative;
   }
 </style>
